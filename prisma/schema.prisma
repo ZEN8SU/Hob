@@ -1,0 +1,136 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model user {
+  id         String   @id @default(uuid()) @db.Uuid
+  name       String
+  email      String   @unique
+  phone      String   @unique
+  age        Int?     @default(18)
+  createdAt  DateTime? @default(now())
+
+  customer_profile customer_profile?
+  worker_profile   worker_profile[]
+
+  review_reviewee     review[]      @relation("review_revieweeIdTouser")
+  review_reviewer     review[]      @relation("review_reviewerIdTouser")
+  transaction_payee   transaction[] @relation("transaction_payeeIdTouser")
+  transaction_payer   transaction[] @relation("transaction_payerIdTouser")
+}
+
+model customer_profile {
+  id        String  @id @default(uuid()) @db.Uuid
+  userId    String  @unique @db.Uuid
+  address   String
+  avgRating Float   @default(0)
+
+  user             user               @relation(fields: [userId], references: [id])
+  service_request  service_request[]
+}
+
+model worker_profile {
+  id          String  @id @default(uuid()) @db.Uuid
+  userId      String  @db.Uuid
+  skills      String
+  hourlyRate  Float
+  isAvailable Boolean @default(true)
+  avgRating   Float   @default(0)
+
+  user    user      @relation(fields: [userId], references: [id])
+  booking booking[]
+  service service[]
+}
+
+model service {
+  id       String @id @default(uuid()) @db.Uuid
+  workerId String @db.Uuid
+  title    String
+  category String
+  baseRate Float
+
+  worker_profile  worker_profile     @relation(fields: [workerId], references: [id])
+  service_request service_request[]
+}
+
+model service_request {
+  id           String   @id @default(uuid()) @db.Uuid
+  customerId   String   @db.Uuid
+  serviceId    String?  @db.Uuid
+  status       String   @default("pending")
+  scheduledFor DateTime
+  createdAt    DateTime @default(now())
+
+  customer_profile customer_profile @relation(fields: [customerId], references: [id])
+  service          service?         @relation(fields: [serviceId], references: [id])
+  booking          booking[]
+}
+
+model booking {
+  id          String    @id @default(uuid()) @db.Uuid
+  requestId   String    @db.Uuid
+  workerId    String    @db.Uuid
+  status      String    @default("pending")
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  service_request service_request @relation(fields: [requestId], references: [id])
+  worker_profile  worker_profile  @relation(fields: [workerId], references: [id])
+  fee             fee[]
+  payment         payment[]
+  review          review[]
+}
+
+model fee {
+  id              String  @id @default(uuid()) @db.Uuid
+  bookingId       String  @db.Uuid
+  durationMinutes Int
+  laborAmount     Float
+  platformFee     Float
+  totalAmount     Float
+
+  booking booking @relation(fields: [bookingId], references: [id])
+}
+
+model payment {
+  id        String  @id @default(uuid()) @db.Uuid
+  bookingId String  @db.Uuid
+  amount    Float
+  method    String
+  status    String  @default("pending")
+
+  booking     booking       @relation(fields: [bookingId], references: [id])
+  transaction transaction[]
+}
+
+model transaction {
+  id         String   @id @default(uuid()) @db.Uuid
+  paymentId  String   @db.Uuid
+  payerId    String   @db.Uuid
+  payeeId    String   @db.Uuid
+  amount     Float?
+  settledAt  DateTime @default(now())
+
+  payment payment @relation(fields: [paymentId], references: [id])
+  payer   user    @relation("transaction_payerIdTouser", fields: [payerId], references: [id])
+  payee   user    @relation("transaction_payeeIdTouser", fields: [payeeId], references: [id])
+}
+
+model review {
+  id          String  @id @default(uuid()) @db.Uuid
+  bookingId   String  @db.Uuid
+  reviewerId  String  @db.Uuid
+  revieweeId  String  @db.Uuid
+  rating      Float
+  comment     String?
+
+  booking  booking @relation(fields: [bookingId], references: [id])
+  reviewer user    @relation("review_reviewerIdTouser", fields: [reviewerId], references: [id])
+  reviewee user    @relation("review_revieweeIdTouser", fields: [revieweeId], references: [id])
+}
