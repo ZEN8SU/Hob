@@ -5,10 +5,12 @@ import { ApiError } from "./errorHandler.js";
 
 export interface AuthenticatedUser {
   id: string;
-  phone: string;
   email: string;
   name: string;
-  age: number | null;
+  age: number;
+  phone?: string | null;
+  skills: string[];
+  role: string;
 }
 
 export interface AuthenticatedRequest extends Request {
@@ -33,16 +35,18 @@ export const authenticateJWT = async (
     }
 
     const secret = process.env.JWT_SECRET || "super_secret_jwt_key_hyperlocal_2025";
-    const decoded = jwt.verify(token, secret) as { id: string; phone: string };
+    const decoded = jwt.verify(token, secret) as { id: string; email?: string; phone?: string };
 
     const user = await prisma.user.findUnique({
       where: { id: decoded.id },
       select: {
         id: true,
-        phone: true,
         email: true,
         name: true,
         age: true,
+        phone: true,
+        skills: true,
+        role: true,
       },
     });
 
@@ -56,4 +60,3 @@ export const authenticateJWT = async (
     next(error);
   }
 };
-

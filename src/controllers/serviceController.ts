@@ -2,189 +2,13 @@ import { Response, NextFunction } from "express";
 import prisma from "../config/db.js";
 import { ApiError } from "../middlewares/errorHandler.js";
 import { AuthenticatedRequest } from "../middlewares/auth.js";
+import { calculateHaversineDistanceKm } from "../utils/geo.js";
+import { emitNotificationToUser } from "../socket/socketHandler.js";
 
 /**
- * @desc   Create a Service Offering by Worker
- * @route  POST /api/services
- * @access Private (Worker)
- */
-export const createService = async (
-  req: AuthenticatedRequest,
-  res: Response,
-  next: NextFunction
-): Promise<void> => {
-  try {
-    const userId = req.user?.id;
-    if (!userId) throw new ApiError(401, "Unauthorized");
-
-    const { title, category, baseRate, workerId } = req.body;
-
-    if (!title || !category || baseRate === undefined) {
-      throw new ApiError(400, "Title, category, and baseRate are required.");
-    }
-
-    // Determine target worker_profile
-    let targetWorkerProfileId = workerId;
-
-    if (!targetWorkerProfileId) {
-      const workerProfile = await prisma.worker_profile.findFirst({
-        where: { userId },
-      });
-
-      if (!workerProfile) {
-        throw new ApiError(
-          400,
-          "No WorkerProfile found for your account. Please create a worker profile first."
-        );
-      }
-      targetWorkerProfileId = workerProfile.id;
-    } else {
-      const workerProfile = await prisma.worker_profile.findUnique({
-        where: { id: targetWorkerProfileId },
-      });
-
-      if (!workerProfile || workerProfile.userId !== userId) {
-        throw new ApiError(403, "You do not own this worker profile.");
-      }
-    }
-
-    const service = await prisma.service.create({
-      data: {
-        workerId: targetWorkerProfileId,
-        title: title.trim(),
-        category: category.trim(),
-        baseRate: Number(baseRate),
-      },
-      include: {
-        worker_profile: {
-          include: {
-            user: {
-              select: { id: true, name: true, phone: true },
-            },
-          },
-        },
-      },
-    });
-
-    res.status(201).json({
-      success: true,
-      message: "Service listing created successfully.",
-      service,
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * @desc   Get All Services (Catalog Search & Filter)
- * @route  GET /api/services
- * @access Public
- */
-export const getAllServices = async (
-  req: AuthenticatedRequest,
-  res: Response,
-  next: NextFunction
-): Promise<void> => {
-  try {
-    const { category, search, minRate, maxRate } = req.query;
-
-    const where: any = {};
-
-    if (category && typeof category === "string") {
-      where.category = {
-        contains: category,
-        mode: "insensitive",
-      };
-    }
-
-    if (search && typeof search === "string") {
-      where.OR = [
-        { title: { contains: search, mode: "insensitive" } },
-        { category: { contains: search, mode: "insensitive" } },
-      ];
-    }
-
-    if (minRate || maxRate) {
-      where.baseRate = {};
-      if (minRate) where.baseRate.gte = Number(minRate);
-      if (maxRate) where.baseRate.lte = Number(maxRate);
-    }
-
-    const services = await prisma.service.findMany({
-      where,
-      include: {
-        worker_profile: {
-          include: {
-            user: {
-              select: { id: true, name: true, phone: true },
-            },
-          },
-        },
-      },
-      orderBy: {
-        baseRate: "asc",
-      },
-    });
-
-    res.status(200).json({
-      success: true,
-      count: services.length,
-      services,
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * @desc   Get Service by ID
- * @route  GET /api/services/:id
- * @access Public
- */
-export const getServiceById = async (
-  req: AuthenticatedRequest,
-  res: Response,
-  next: NextFunction
-): Promise<void> => {
-  try {
-    const { id } = req.params;
-    if (!id) throw new ApiError(400, "Service ID is required.");
-
-    const service = await prisma.service.findUnique({
-      where: { id },
-      include: {
-        worker_profile: {
-          include: {
-            user: {
-              select: { id: true, name: true, phone: true },
-            },
-          },
-        },
-        service_request: {
-          take: 5,
-          orderBy: { createdAt: "desc" },
-        },
-      },
-    });
-
-    if (!service) {
-      throw new ApiError(404, "Service not found.");
-    }
-
-    res.status(200).json({
-      success: true,
-      service,
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * @desc   Create a Service Request (Post a Micro-Job Need)
+ * @desc   Create a Service Request (Post a Micro-Job Need with GPS Location & Time Constraints)
  * @route  POST /api/services/requests
- * @access Private (Customer)
+ * @access Private (Poster / Customer)
  */
 export const createServiceRequest = async (
   req: AuthenticatedRequest,
@@ -193,68 +17,126 @@ export const createServiceRequest = async (
 ): Promise<void> => {
   try {
     const userId = req.user?.id;
-    if (!userId) throw new ApiError(401, "Unauthorized");
+    if (!userId) throw new ApiError(401, "Unauthorized: Please login to post a task.");
 
-    const { serviceId, scheduledFor, address } = req.body;
+    const {
+      title,
+      category = "Delivery",
+      description = "",
+      budget = 400,
+      address,
+      latitude,
+      longitude,
+      timeConstraint,
+      scheduledFor,
+      serviceId,
+    } = req.body;
 
-    if (!scheduledFor) {
-      throw new ApiError(400, "scheduledFor (ISO DateTime) is required.");
+    if (!title || !title.trim()) {
+      throw new ApiError(400, "Task title / summary is required.");
     }
 
-    // Ensure user has a customer_profile
+    if (!address || !address.trim()) {
+      throw new ApiError(400, "Pickup / task location address is required.");
+    }
+
+    const scheduledDate = scheduledFor ? new Date(scheduledFor) : new Date(Date.now() + 3600000);
+    const parsedLat = latitude !== undefined && latitude !== null ? parseFloat(String(latitude)) : null;
+    const parsedLon = longitude !== undefined && longitude !== null ? parseFloat(String(longitude)) : null;
+    const numericBudget = parseFloat(String(budget)) || 350;
+
     let customerProfile = await prisma.customer_profile.findUnique({
       where: { userId },
     });
 
     if (!customerProfile) {
-      if (!address || typeof address !== "string") {
-        throw new ApiError(
-          400,
-          "No Customer Profile found. Please provide an `address` to create your customer profile."
-        );
-      }
       customerProfile = await prisma.customer_profile.create({
         data: {
           userId,
           address: address.trim(),
-          avgRating: 0,
+          latitude: parsedLat,
+          longitude: parsedLon,
+          avgRating: 5.0,
         },
       });
-    }
-
-    // If serviceId is provided, verify it exists
-    if (serviceId) {
-      const existingService = await prisma.service.findUnique({
-        where: { id: serviceId },
+    } else if (parsedLat && parsedLon) {
+      await prisma.customer_profile.update({
+        where: { id: customerProfile.id },
+        data: {
+          address: address.trim(),
+          latitude: parsedLat,
+          longitude: parsedLon,
+        },
       });
-      if (!existingService) {
-        throw new ApiError(404, "Target service not found.");
-      }
     }
 
     const serviceRequest = await prisma.service_request.create({
       data: {
         customerId: customerProfile.id,
-        serviceId: serviceId || null,
-        scheduledFor: new Date(scheduledFor),
+        serviceId: serviceId ? String(serviceId) : null,
+        title: title.trim(),
+        description: description?.trim() || null,
+        category: category.trim(),
+        budget: numericBudget,
+        address: address.trim(),
+        latitude: parsedLat,
+        longitude: parsedLon,
+        timeConstraint: timeConstraint?.trim() || "Within 3 hours",
+        scheduledFor: scheduledDate,
         status: "pending",
       },
       include: {
         customer_profile: {
           include: {
             user: {
-              select: { id: true, name: true, phone: true },
+              select: { id: true, name: true, email: true, phone: true, avatarUrl: true },
             },
           },
         },
-        service: true,
+        bids: true,
       },
     });
 
+    const cleanCategory = category.trim().toLowerCase();
+    const matchingWorkers = await prisma.worker_profile.findMany({
+      where: {
+        userId: { not: userId },
+        isAvailable: true,
+        OR: [
+          { skills: { contains: cleanCategory, mode: "insensitive" } },
+          { skillsList: { has: category.trim() } },
+          { skills: { contains: "Errands", mode: "insensitive" } },
+        ],
+      },
+      include: {
+        user: { select: { id: true, name: true, email: true } },
+      },
+    });
+
+    for (const worker of matchingWorkers) {
+      const notification = await prisma.notification.create({
+        data: {
+          userId: worker.userId,
+          title: `New ${category} Task Nearby!`,
+          message: `"${title.slice(0, 45)}..." offering ₹${numericBudget}. Place your bid now.`,
+          type: "task_match",
+          data: {
+            taskId: serviceRequest.id,
+            category,
+            budget: numericBudget,
+            address: serviceRequest.address,
+          },
+        },
+      });
+
+      emitNotificationToUser(worker.userId, notification);
+    }
+
     res.status(201).json({
       success: true,
-      message: "Micro-task request posted successfully.",
+      message: "Micro-task posted successfully and notified matching taskers.",
       request: serviceRequest,
+      matchingWorkersNotified: matchingWorkers.length,
     });
   } catch (error) {
     next(error);
@@ -262,7 +144,7 @@ export const createServiceRequest = async (
 };
 
 /**
- * @desc   Get All Service Requests (Browse Open Gigs / Tasks)
+ * @desc   Get All Service Requests (Browse Open Gigs / Feed with 5km Dynamic Radius)
  * @route  GET /api/services/requests/feed
  * @access Public / Private
  */
@@ -272,32 +154,123 @@ export const getAllServiceRequests = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    const { status = "pending" } = req.query;
+    const currentUserId = req.user?.id;
+    const {
+      status = "pending",
+      category,
+      search,
+      mode = "tasker",
+      latitude,
+      longitude,
+      radius = "5",
+    } = req.query;
 
-    const requests = await prisma.service_request.findMany({
-      where: {
-        ...(status ? { status: String(status) } : {}),
-      },
+    const parsedRadiusKm = parseFloat(String(radius)) || 5;
+    const userLat = latitude ? parseFloat(String(latitude)) : null;
+    const userLon = longitude ? parseFloat(String(longitude)) : null;
+
+    let whereClause: any = {};
+
+    if (status && status !== "all") {
+      whereClause.status = String(status);
+    }
+
+    if (category && typeof category === "string" && category !== "All") {
+      whereClause.category = {
+        contains: category,
+        mode: "insensitive",
+      };
+    }
+
+    if (search && typeof search === "string" && search.trim()) {
+      whereClause.OR = [
+        { title: { contains: search.trim(), mode: "insensitive" } },
+        { description: { contains: search.trim(), mode: "insensitive" } },
+        { address: { contains: search.trim(), mode: "insensitive" } },
+        { category: { contains: search.trim(), mode: "insensitive" } },
+      ];
+    }
+
+    if (mode === "poster" && currentUserId) {
+      whereClause.customer_profile = {
+        userId: currentUserId,
+      };
+    } else if (mode === "tasker" && currentUserId) {
+      whereClause.customer_profile = {
+        userId: { not: currentUserId },
+      };
+    }
+
+    const rawRequests = await prisma.service_request.findMany({
+      where: whereClause,
       include: {
         customer_profile: {
           include: {
             user: {
-              select: { id: true, name: true, phone: true },
+              select: { id: true, name: true, email: true, phone: true, avatarUrl: true },
+            },
+          },
+        },
+        bids: {
+          include: {
+            worker_profile: {
+              include: {
+                user: { select: { id: true, name: true, avatarUrl: true } },
+              },
+            },
+          },
+        },
+        booking: {
+          include: {
+            worker_profile: {
+              include: {
+                user: { select: { id: true, name: true, phone: true } },
+              },
             },
           },
         },
         service: true,
-        booking: true,
       },
       orderBy: {
         createdAt: "desc",
       },
     });
 
+    let processedRequests = rawRequests.map((r) => {
+      let distanceKm: number | null = null;
+
+      if (userLat !== null && userLon !== null && r.latitude !== null && r.longitude !== null) {
+        distanceKm = calculateHaversineDistanceKm(userLat, userLon, r.latitude, r.longitude);
+      } else if (r.latitude !== null && r.longitude !== null && userLat === null) {
+        distanceKm = calculateHaversineDistanceKm(12.9716, 77.5946, r.latitude, r.longitude);
+      }
+
+      return {
+        ...r,
+        distanceKm,
+        bidsCount: r.bids.length,
+      };
+    });
+
+    if (mode === "tasker" && userLat !== null && userLon !== null) {
+      processedRequests = processedRequests.filter((r) => {
+        if (r.distanceKm === null) return true;
+        return r.distanceKm <= parsedRadiusKm;
+      });
+
+      processedRequests.sort((a, b) => {
+        if (a.distanceKm === null) return 1;
+        if (b.distanceKm === null) return -1;
+        return (a.distanceKm ?? 0) - (b.distanceKm ?? 0);
+      });
+    }
+
     res.status(200).json({
       success: true,
-      count: requests.length,
-      requests,
+      count: processedRequests.length,
+      mode,
+      appliedRadiusKm: mode === "tasker" ? parsedRadiusKm : null,
+      requests: processedRequests,
     });
   } catch (error) {
     next(error);
@@ -305,7 +278,70 @@ export const getAllServiceRequests = async (
 };
 
 /**
- * @desc   Get Service Requests Posted By Authenticated User
+ * @desc   Get Specific Service Request Details
+ * @route  GET /api/services/requests/:id
+ * @access Public / Private
+ */
+export const getServiceRequestById = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const id = String(req.params.id);
+    if (!id) throw new ApiError(400, "Task ID is required.");
+
+    const request = await prisma.service_request.findUnique({
+      where: { id },
+      include: {
+        customer_profile: {
+          include: {
+            user: {
+              select: { id: true, name: true, email: true, phone: true, avatarUrl: true },
+            },
+          },
+        },
+        bids: {
+          include: {
+            worker_profile: {
+              include: {
+                user: { select: { id: true, name: true, email: true, avatarUrl: true } },
+              },
+            },
+          },
+          orderBy: { createdAt: "desc" },
+        },
+        booking: {
+          include: {
+            worker_profile: {
+              include: {
+                user: { select: { id: true, name: true, phone: true, avatarUrl: true } },
+              },
+            },
+            payment: true,
+            fee: true,
+            review: true,
+          },
+        },
+        service: true,
+      },
+    });
+
+    if (!request) {
+      throw new ApiError(404, "Service request not found.");
+    }
+
+    res.status(200).json({
+      success: true,
+      request,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc   Get Service Requests Posted by Current Authenticated User (Poster Tasks)
  * @route  GET /api/services/requests/my
  * @access Private
  */
@@ -332,26 +368,29 @@ export const getMyServiceRequests = async (
     }
 
     const requests = await prisma.service_request.findMany({
-      where: {
-        customerId: customerProfile.id,
-      },
+      where: { customerId: customerProfile.id },
       include: {
-        service: true,
-        booking: {
+        bids: {
           include: {
             worker_profile: {
               include: {
-                user: {
-                  select: { id: true, name: true, phone: true },
-                },
+                user: { select: { id: true, name: true, avatarUrl: true } },
               },
             },
           },
         },
+        booking: {
+          include: {
+            worker_profile: {
+              include: {
+                user: { select: { id: true, name: true, phone: true } },
+              },
+            },
+            payment: true,
+          },
+        },
       },
-      orderBy: {
-        createdAt: "desc",
-      },
+      orderBy: { createdAt: "desc" },
     });
 
     res.status(200).json({
@@ -364,3 +403,78 @@ export const getMyServiceRequests = async (
   }
 };
 
+/**
+ * Legacy service catalog methods
+ */
+export const createService = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) throw new ApiError(401, "Unauthorized");
+
+    const { title, category, baseRate, workerId } = req.body;
+    let targetWorkerProfileId = workerId ? String(workerId) : undefined;
+
+    if (!targetWorkerProfileId) {
+      const workerProfile = await prisma.worker_profile.findFirst({
+        where: { userId },
+      });
+      if (!workerProfile) {
+        throw new ApiError(400, "Worker profile required.");
+      }
+      targetWorkerProfileId = workerProfile.id;
+    }
+
+    const service = await prisma.service.create({
+      data: {
+        workerId: targetWorkerProfileId,
+        title: title.trim(),
+        category: category.trim(),
+        baseRate: Number(baseRate),
+      },
+      include: {
+        worker_profile: true,
+      },
+    });
+
+    res.status(201).json({ success: true, service });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const getAllServices = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const services = await prisma.service.findMany({
+      include: { worker_profile: { include: { user: true } } },
+    });
+    res.status(200).json({ success: true, count: services.length, services });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const getServiceById = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const id = String(req.params.id);
+    const service = await prisma.service.findUnique({
+      where: { id },
+      include: { worker_profile: { include: { user: true } } },
+    });
+    if (!service) throw new ApiError(404, "Service not found");
+    res.status(200).json({ success: true, service });
+  } catch (error) {
+    next(error);
+  }
+};

@@ -1,5 +1,9 @@
 import { Router } from "express";
 import {
+  getProfile,
+  updateProfile,
+  getNotifications,
+  markNotificationRead,
   upsertCustomerProfile,
   createWorkerProfile,
   updateWorkerProfile,
@@ -11,15 +15,22 @@ import { authenticateJWT } from "../middlewares/auth.js";
 
 const router = Router();
 
-// Profile management
-router.post("/customer-profile", authenticateJWT, upsertCustomerProfile);
-router.post("/worker-profile", authenticateJWT, createWorkerProfile);
-router.put("/worker-profile/:id", authenticateJWT, updateWorkerProfile);
-router.get("/my-profiles", authenticateJWT, getMyProfiles);
-
-// Hyperlocal Worker discovery
+// Public worker directory
 router.get("/workers", getAllWorkers);
 router.get("/workers/:id", getWorkerById);
 
-export default router;
+// Authenticated user profile & notification routes
+router.use(authenticateJWT);
 
+router.get("/profile", getProfile);
+router.put("/profile", updateProfile);
+
+router.get("/notifications", getNotifications);
+router.patch("/notifications/:id/read", markNotificationRead);
+
+router.get("/my-profiles", getMyProfiles);
+router.post("/customer-profile", upsertCustomerProfile);
+router.post("/worker-profile", createWorkerProfile);
+router.put("/worker-profile/:id", updateWorkerProfile);
+
+export default router;

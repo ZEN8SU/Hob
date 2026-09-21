@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
@@ -18,8 +18,10 @@ import {
   X,
   Sparkles,
   LucideIcon,
+  Check,
 } from "lucide-react";
 import { useAppStore } from "@/lib/store";
+import { userApi } from "@/lib/api";
 import { Button } from "./ui/Button";
 
 interface NavItem {
@@ -32,9 +34,11 @@ interface NavItem {
 export const Navbar: React.FC = () => {
   const pathname = usePathname();
   const router = useRouter();
-  const { user, token, mode, toggleMode, logout, walletBalance } = useAppStore();
+  const { user, token, mode, toggleMode, logout, walletBalance, unreadNotifications, setUnreadNotifications } =
+    useAppStore();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [notificationsList, setNotificationsList] = useState<any[]>([]);
 
   const isPoster = mode === "poster";
 
@@ -42,14 +46,45 @@ export const Navbar: React.FC = () => {
     { name: "Browse Feed", href: "/dashboard", icon: Search },
     { name: "Post Micro-Task", href: "/create-task", icon: PlusCircle, highlight: true },
     { name: "Escrow Wallet", href: "/wallet", icon: Wallet },
+    { name: "My Profile", href: "/profile", icon: UserIcon },
   ];
 
   const workerNavLinks: NavItem[] = [
     { name: "Find Gigs Feed", href: "/dashboard", icon: Search },
     { name: "My Earnings", href: "/wallet", icon: Wallet },
+    { name: "My Profile", href: "/profile", icon: UserIcon },
   ];
 
   const currentLinks = isPoster ? posterNavLinks : workerNavLinks;
+
+  const fetchNotifications = async () => {
+    if (!token) return;
+    try {
+      const res = await userApi.getNotifications();
+      setNotificationsList(res.data.notifications || []);
+      setUnreadNotifications(res.data.unreadCount || 0);
+    } catch (err) {
+      console.error("Error fetching notifications:", err);
+    }
+  };
+
+  useEffect(() => {
+    fetchNotifications();
+    const interval = setInterval(fetchNotifications, 15000);
+    return () => clearInterval(interval);
+  }, [token]);
+
+  const handleMarkAsRead = async (id: string) => {
+    try {
+      await userApi.markNotificationRead(id);
+      setNotificationsList((prev) =>
+        prev.map((n) => (n.id === id ? { ...n, isRead: true } : n))
+      );
+      setUnreadNotifications(Math.max(0, unreadNotifications - 1));
+    } catch (err) {
+      console.error(err);
+    }
+  };
 
   const handleLogout = () => {
     logout();
@@ -57,7 +92,7 @@ export const Navbar: React.FC = () => {
   };
 
   return (
-    <header className="sticky top-0 z-50 w-full honey-glass border-b border-yellow-400/20 bg-white/80 backdrop-blur-md">
+    <header className="sticky top-0 z-50 w-full honey-glass border-b border-yellow-400/20 bg-white/90 backdrop-blur-md">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16">
           {/* Brand Logo */}
@@ -74,7 +109,7 @@ export const Navbar: React.FC = () => {
                   HOB<span className="text-yellow-500">.</span>
                 </span>
                 <span className="bg-yellow-400 text-zinc-950 text-[10px] font-extrabold px-1.5 py-0.5 rounded-md uppercase tracking-wider">
-                  BEE v1
+                  PROD v2
                 </span>
               </div>
               <span className="text-[10px] font-medium text-zinc-500 -mt-1 tracking-tight">
@@ -134,9 +169,7 @@ export const Navbar: React.FC = () => {
               }`}
             >
               <ArrowRightLeft className="w-3.5 h-3.5" />
-              <span>
-                {isPoster ? "Poster Mode (Need Help)" : "Tasker Mode (Earn ₹)"}
-              </span>
+              <span>{isPoster ? "Poster Mode (Need Help)" : "Tasker Mode (Earn ₹)"}</span>
             </motion.button>
 
             {/* Wallet Balance Pill */}
@@ -157,7 +190,9 @@ export const Navbar: React.FC = () => {
                 aria-label="Notifications"
               >
                 <Bell className="w-5 h-5" />
-                <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-yellow-500 ring-2 ring-white"></span>
+                {unreadNotifications > 0 && (
+                  <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-yellow-500 ring-2 ring-white"></span>
+                )}
               </button>
 
               <AnimatePresence>
@@ -166,27 +201,47 @@ export const Navbar: React.FC = () => {
                     initial={{ opacity: 0, y: 10, scale: 0.95 }}
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                    className="absolute right-0 mt-2 w-80 bg-white rounded-2xl shadow-xl border border-zinc-200 p-4 z-50"
+                    className="absolute right-0 mt-2 w-80 bg-white rounded-2xl shadow-2xl border border-zinc-200 p-4 z-50 max-h-96 overflow-y-auto"
                   >
                     <div className="flex items-center justify-between pb-2 border-b border-zinc-100 mb-2">
-                      <span className="text-xs font-bold text-zinc-900">Notifications</span>
-                      <span className="text-[10px] text-yellow-700 bg-yellow-100 px-2 py-0.5 rounded-full font-bold">
-                        2 New
+                      <span className="text-xs font-black text-zinc-900">Live Skill & Task Alerts</span>
+                      <span className="text-[10px] text-yellow-800 bg-yellow-100 px-2 py-0.5 rounded-full font-bold">
+                        {unreadNotifications} New
                       </span>
                     </div>
+
                     <div className="space-y-2 text-xs">
-                      <div className="p-2.5 rounded-xl bg-yellow-50/70 border border-yellow-200/60">
-                        <p className="font-bold text-zinc-900">Escrow Locked: ₹500</p>
-                        <p className="text-zinc-600 text-[11px]">
-                          Tasker assigned for &quot;Groceries Delivery - Bellandur&quot;.
+                      {notificationsList.length > 0 ? (
+                        notificationsList.map((notif) => (
+                          <div
+                            key={notif.id}
+                            onClick={() => handleMarkAsRead(notif.id)}
+                            className={`p-2.5 rounded-xl border transition cursor-pointer ${
+                              notif.isRead
+                                ? "bg-zinc-50 border-zinc-100 text-zinc-600"
+                                : "bg-yellow-50/80 border-yellow-200 text-zinc-900 font-medium"
+                            }`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <p className="font-extrabold text-xs">{notif.title}</p>
+                              {!notif.isRead && (
+                                <span className="w-1.5 h-1.5 rounded-full bg-yellow-500"></span>
+                              )}
+                            </div>
+                            <p className="text-[11px] mt-0.5">{notif.message}</p>
+                            <span className="text-[9px] text-zinc-400 mt-1 block">
+                              {new Date(notif.createdAt).toLocaleTimeString([], {
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })}
+                            </span>
+                          </div>
+                        ))
+                      ) : (
+                        <p className="text-center text-[11px] text-zinc-400 py-4">
+                          No notifications yet.
                         </p>
-                      </div>
-                      <div className="p-2.5 rounded-xl bg-zinc-50 border border-zinc-100">
-                        <p className="font-bold text-zinc-900">Task Completed ⭐</p>
-                        <p className="text-zinc-600 text-[11px]">
-                          Please leave a mutual review to release escrow.
-                        </p>
-                      </div>
+                      )}
                     </div>
                   </motion.div>
                 )}
@@ -196,9 +251,11 @@ export const Navbar: React.FC = () => {
             {/* User Profile / Auth Button */}
             {token ? (
               <div className="flex items-center gap-2 pl-2 border-l border-zinc-200">
-                <div className="w-8 h-8 rounded-full bg-zinc-900 text-yellow-400 font-bold text-xs flex items-center justify-center border border-yellow-400">
-                  {user?.name ? user.name[0]?.toUpperCase() : "U"}
-                </div>
+                <Link href="/profile">
+                  <div className="w-8 h-8 rounded-full bg-zinc-900 text-yellow-400 font-bold text-xs flex items-center justify-center border border-yellow-400 hover:scale-105 transition cursor-pointer">
+                    {user?.name ? user.name[0]?.toUpperCase() : "U"}
+                  </div>
+                </Link>
                 <button
                   onClick={handleLogout}
                   title="Logout"

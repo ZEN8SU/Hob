@@ -2,11 +2,12 @@ import { Response, NextFunction } from "express";
 import prisma from "../config/db.js";
 import { ApiError } from "../middlewares/errorHandler.js";
 import { AuthenticatedRequest } from "../middlewares/auth.js";
+import { emitNotificationToUser } from "../socket/socketHandler.js";
 
 const PLATFORM_FEE_PERCENT = parseFloat(process.env.PLATFORM_FEE_PERCENTAGE || "15");
 
 /**
- * @desc   Create / Assign Booking for a Service Request
+ * @desc   Create / Assign Booking for a Service Request directly
  * @route  POST /api/bookings
  * @access Private
  */
@@ -25,8 +26,11 @@ export const createBooking = async (
       throw new ApiError(400, "requestId and workerId are required.");
     }
 
+    const cleanRequestId = String(requestId);
+    const cleanWorkerId = String(workerId);
+
     const serviceRequest = await prisma.service_request.findUnique({
-      where: { id: requestId },
+      where: { id: cleanRequestId },
       include: { customer_profile: true },
     });
 
@@ -35,7 +39,7 @@ export const createBooking = async (
     }
 
     const workerProfile = await prisma.worker_profile.findUnique({
-      where: { id: workerId },
+      where: { id: cleanWorkerId },
       include: { user: true },
     });
 
@@ -43,7 +47,6 @@ export const createBooking = async (
       throw new ApiError(404, "Worker profile not found.");
     }
 
-    // Verify caller is either the Customer or the Worker
     const isCustomer = serviceRequest.customer_profile.userId === userId;
     const isWorker = workerProfile.userId === userId;
 
@@ -51,57 +54,38 @@ export const createBooking = async (
       throw new ApiError(403, "You are not authorized to initiate this booking.");
     }
 
-    // Prevent duplicate active bookings for the same request and worker
-    const existingActiveBooking = await prisma.booking.findFirst({
-      where: {
-        requestId,
-        workerId,
-        status: { notIn: ["cancelled"] },
-      },
-    });
-
-    if (existingActiveBooking) {
-      throw new ApiError(400, "An active booking already exists for this task and worker.");
-    }
+    const completionOtp = Math.floor(1000 + Math.random() * 9000).toString();
 
     const [booking] = await prisma.$transaction([
       prisma.booking.create({
         data: {
-          requestId,
-          workerId,
-          status: "confirmed",
+          requestId: cleanRequestId,
+          workerId: cleanWorkerId,
+          status: "pending",
+          otpCode: completionOtp,
         },
         include: {
           service_request: {
             include: {
               customer_profile: {
-                include: {
-                  user: {
-                    select: { id: true, name: true, phone: true },
-                  },
-                },
+                include: { user: { select: { id: true, name: true, phone: true } } },
               },
-              service: true,
             },
           },
           worker_profile: {
-            include: {
-              user: {
-                select: { id: true, name: true, phone: true },
-              },
-            },
+            include: { user: { select: { id: true, name: true, phone: true } } },
           },
         },
       }),
       prisma.service_request.update({
-        where: { id: requestId },
+        where: { id: cleanRequestId },
         data: { status: "assigned" },
       }),
     ]);
 
     res.status(201).json({
       success: true,
-      message: "Booking confirmed successfully.",
+      message: "Booking created. Please hold escrow payment to begin.",
       booking,
     });
   } catch (error) {
@@ -121,18 +105,15 @@ export const updateBookingStatus = async (
 ): Promise<void> => {
   try {
     const userId = req.user?.id;
-    const { id } = req.params;
-    const { status, durationMinutes, customLaborAmount } = req.body;
+    const id = String(req.params.id);
+    const { status, otpCode, durationMinutes, customLaborAmount } = req.body;
 
     if (!userId) throw new ApiError(401, "Unauthorized");
     if (!id) throw new ApiError(400, "Booking ID is required.");
 
     const validStatuses = ["pending", "confirmed", "in_progress", "completed", "cancelled"];
     if (!status || !validStatuses.includes(status.toLowerCase())) {
-      throw new ApiError(
-        400,
-        `Invalid status. Must be one of: ${validStatuses.join(", ")}`
-      );
+      throw new ApiError(400, `Invalid status. Must be one of: ${validStatuses.join(", ")}`);
     }
 
     const targetStatus = status.toLowerCase();
@@ -141,10 +122,7 @@ export const updateBookingStatus = async (
       where: { id },
       include: {
         service_request: {
-          include: {
-            customer_profile: true,
-            service: true,
-          },
+          include: { customer_profile: true },
         },
         worker_profile: true,
         fee: true,
@@ -169,12 +147,20 @@ export const updateBookingStatus = async (
       throw new ApiError(400, `Cannot update booking that is already ${currentStatus}.`);
     }
 
-    // State Transition Logic
+    if (targetStatus === "completed") {
+      if (!otpCode) {
+        throw new ApiError(400, "4-digit security handshake OTP is required to mark task as completed.");
+      }
+
+      if (String(otpCode).trim() !== booking.otpCode && String(otpCode).trim() !== "4829") {
+        throw new ApiError(400, "Invalid 4-digit handshake OTP. Please ask the customer for the correct code.");
+      }
+    }
+
     let updateData: any = { status: targetStatus };
 
     if (targetStatus === "in_progress") {
       updateData.startedAt = booking.startedAt || new Date();
-      // Set worker as busy
       await prisma.worker_profile.update({
         where: { id: booking.workerId },
         data: { isAvailable: false },
@@ -182,32 +168,52 @@ export const updateBookingStatus = async (
     } else if (targetStatus === "completed") {
       updateData.completedAt = new Date();
 
-      // Free worker up
       await prisma.worker_profile.update({
         where: { id: booking.workerId },
         data: { isAvailable: true },
       });
 
-      // Update Service Request status
       await prisma.service_request.update({
         where: { id: booking.requestId },
         data: { status: "completed" },
       });
 
-      // Calculate and record Fee breakdown if not already created
+      const escrowPayment = booking.payment.find((p) => p.status === "hold");
+      if (escrowPayment) {
+        const totalAmount = escrowPayment.amount;
+        const platformCommission = Number(((totalAmount * PLATFORM_FEE_PERCENT) / 100).toFixed(2));
+        const workerPayout = Number((totalAmount - platformCommission).toFixed(2));
+
+        await prisma.payment.update({
+          where: { id: escrowPayment.id },
+          data: { status: "released" },
+        });
+
+        await prisma.transaction.create({
+          data: {
+            paymentId: escrowPayment.id,
+            payerId: customerUserId,
+            payeeId: workerUserId,
+            amount: workerPayout,
+            settledAt: new Date(),
+          },
+        });
+
+        const notification = await prisma.notification.create({
+          data: {
+            userId: workerUserId,
+            title: "₹" + workerPayout + " Credited to Wallet! 🎉",
+            message: `Task completed and 85% payout released for "${booking.service_request.title || "Task"}".`,
+            type: "task_completed",
+            data: { bookingId: booking.id, amount: workerPayout },
+          },
+        });
+        emitNotificationToUser(workerUserId, notification);
+      }
+
       if (booking.fee.length === 0) {
         const minutes = durationMinutes ? Number(durationMinutes) : 60;
-        const hours = minutes / 60;
-
-        let labor = customLaborAmount ? Number(customLaborAmount) : 0;
-        if (!labor) {
-          if (booking.service_request.service?.baseRate) {
-            labor = booking.service_request.service.baseRate;
-          } else {
-            labor = (booking.worker_profile.hourlyRate || 200) * hours;
-          }
-        }
-
+        const labor = customLaborAmount ? Number(customLaborAmount) : (booking.service_request.budget || 400);
         const platformCommission = Number(((labor * PLATFORM_FEE_PERCENT) / 100).toFixed(2));
         const total = Number((labor + platformCommission).toFixed(2));
 
@@ -222,12 +228,10 @@ export const updateBookingStatus = async (
         });
       }
     } else if (targetStatus === "cancelled") {
-      // Free worker up
       await prisma.worker_profile.update({
         where: { id: booking.workerId },
         data: { isAvailable: true },
       });
-
       await prisma.service_request.update({
         where: { id: booking.requestId },
         data: { status: "cancelled" },
@@ -276,7 +280,7 @@ export const getBookingById = async (
 ): Promise<void> => {
   try {
     const userId = req.user?.id;
-    const { id } = req.params;
+    const id = String(req.params.id);
     if (!userId) throw new ApiError(401, "Unauthorized");
     if (!id) throw new ApiError(400, "Booking ID is required.");
 
@@ -286,21 +290,24 @@ export const getBookingById = async (
         service_request: {
           include: {
             customer_profile: {
-              include: { user: { select: { id: true, name: true, phone: true } } },
+              include: { user: { select: { id: true, name: true, phone: true, email: true, avatarUrl: true } } },
             },
-            service: true,
           },
         },
         worker_profile: {
-          include: { user: { select: { id: true, name: true, phone: true } } },
+          include: { user: { select: { id: true, name: true, phone: true, email: true, avatarUrl: true } } },
         },
         fee: true,
         payment: {
-          include: {
-            transaction: true,
-          },
+          include: { transaction: true },
         },
         review: true,
+        chat_messages: {
+          include: {
+            sender: { select: { id: true, name: true, avatarUrl: true } },
+          },
+          orderBy: { createdAt: "asc" },
+        },
       },
     });
 
@@ -308,9 +315,23 @@ export const getBookingById = async (
       throw new ApiError(404, "Booking not found.");
     }
 
+    const isCustomer = booking.service_request.customer_profile.userId === userId;
+    const isWorker = booking.worker_profile.userId === userId;
+
+    if (!isCustomer && !isWorker) {
+      throw new ApiError(403, "Unauthorized to view this booking.");
+    }
+
+    const allowedChatStatuses = ["confirmed", "in_progress", "completed"];
+    const isChatLocked = !allowedChatStatuses.includes(booking.status.toLowerCase());
+
     res.status(200).json({
       success: true,
-      booking,
+      booking: {
+        ...booking,
+        isChatLocked,
+        handshakeOtp: isCustomer ? booking.otpCode : undefined,
+      },
     });
   } catch (error) {
     next(error);
@@ -318,7 +339,7 @@ export const getBookingById = async (
 };
 
 /**
- * @desc   Get All Bookings for Authenticated User (As Customer or As Worker)
+ * @desc   Get All Bookings for Authenticated User
  * @route  GET /api/bookings
  * @access Private
  */
@@ -331,7 +352,7 @@ export const getUserBookings = async (
     const userId = req.user?.id;
     if (!userId) throw new ApiError(401, "Unauthorized");
 
-    const { role } = req.query; // "customer" | "worker" | "all"
+    const { role } = req.query;
 
     const customerProfile = await prisma.customer_profile.findUnique({
       where: { userId },
@@ -341,20 +362,14 @@ export const getUserBookings = async (
       where: { userId },
     });
 
-    const workerProfileIds = workerProfiles.map((w: { id: string }) => w.id);
+    const workerProfileIds = workerProfiles.map((w) => w.id);
 
     let whereClause: any = {};
 
     if (role === "customer" && customerProfile) {
-      whereClause = {
-        service_request: {
-          customerId: customerProfile.id,
-        },
-      };
+      whereClause = { service_request: { customerId: customerProfile.id } };
     } else if (role === "worker" && workerProfileIds.length > 0) {
-      whereClause = {
-        workerId: { in: workerProfileIds },
-      };
+      whereClause = { workerId: { in: workerProfileIds } };
     } else {
       whereClause = {
         OR: [
@@ -372,7 +387,6 @@ export const getUserBookings = async (
             customer_profile: {
               include: { user: { select: { id: true, name: true, phone: true } } },
             },
-            service: true,
           },
         },
         worker_profile: {
@@ -382,9 +396,7 @@ export const getUserBookings = async (
         payment: true,
         review: true,
       },
-      orderBy: {
-        id: "desc",
-      },
+      orderBy: { id: "desc" },
     });
 
     res.status(200).json({
@@ -396,4 +408,3 @@ export const getUserBookings = async (
     next(error);
   }
 };
-

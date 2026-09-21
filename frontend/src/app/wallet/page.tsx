@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Wallet,
@@ -14,78 +15,82 @@ import {
   Smartphone,
   CheckCircle2,
   X,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Input } from "@/components/ui/Input";
 import { useAppStore } from "@/lib/store";
+import { paymentApi } from "@/lib/api";
 
 export default function WalletPage() {
-  const { walletBalance, escrowLocked, updateWallet } = useAppStore();
+  const router = useRouter();
+  const { token, updateWallet } = useAppStore();
+
+  const [loading, setLoading] = useState(true);
+  const [walletStats, setWalletStats] = useState({
+    availableBalance: 2450.0,
+    escrowHold: 450.0,
+    totalLifetimeEarnings: 8940.0,
+  });
 
   const [showDepositModal, setShowDepositModal] = useState(false);
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
   const [depositAmount, setDepositAmount] = useState("1000");
   const [withdrawAmount, setWithdrawAmount] = useState("500");
   const [upiId, setUpiId] = useState("user@okaxis");
+  const [transactions, setTransactions] = useState<any[]>([]);
 
-  const [transactions, setTransactions] = useState([
-    {
-      id: "tx-1",
-      title: "Escrow Release (85% Worker Payout)",
-      task: "Medicine & Grocery Urgent Delivery",
-      amount: 382.5,
-      type: "credit",
-      status: "settled",
-      date: "Today, 11:15 AM",
-      method: "UPI (GooglePay)",
-    },
-    {
-      id: "tx-2",
-      title: "Escrow Deposit Locked",
-      task: "Line standing for Passport token",
-      amount: 450.0,
-      type: "hold",
-      status: "locked",
-      date: "Today, 09:30 AM",
-      method: "PhonePe UPI",
-    },
-    {
-      id: "tx-3",
-      title: "Direct UPI Withdrawal",
-      task: "Bank Payout to HDFC A/c **4921",
-      amount: 1500.0,
-      type: "debit",
-      status: "settled",
-      date: "Yesterday, 04:20 PM",
-      method: "IMPS Payout",
-    },
-    {
-      id: "tx-4",
-      title: "Escrow Release (85% Worker Payout)",
-      task: "Urgent 20-page Hindi to English typing",
-      amount: 510.0,
-      type: "credit",
-      status: "settled",
-      date: "18 Sep, 02:10 PM",
-      method: "Paytm Wallet",
-    },
-  ]);
+  const fetchWallet = async () => {
+    try {
+      setLoading(true);
+      const res = await paymentApi.getWalletLedger();
+      if (res.data?.wallet) {
+        setWalletStats(res.data.wallet);
+        updateWallet(
+          res.data.wallet.availableBalance,
+          res.data.wallet.escrowHold,
+          res.data.wallet.totalLifetimeEarnings
+        );
+      }
+      if (res.data?.transactions) {
+        setTransactions(res.data.transactions);
+      }
+    } catch (err: any) {
+      console.error("Error loading wallet ledger:", err);
+      if (err.response?.status === 401) {
+        router.push("/login");
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!token) {
+      router.push("/login");
+      return;
+    }
+    fetchWallet();
+  }, [token]);
 
   const handleDeposit = () => {
     const amt = Number(depositAmount);
     if (amt > 0) {
-      updateWallet(walletBalance + amt);
+      setWalletStats((prev) => ({
+        ...prev,
+        availableBalance: prev.availableBalance + amt,
+      }));
       setTransactions((prev) => [
         {
           id: `tx-${Date.now()}`,
-          title: "Instant UPI Top-up",
-          task: `Added funds via ${upiId}`,
           amount: amt,
-          type: "credit",
-          status: "settled",
-          date: "Just now",
-          method: "UPI Gateway",
+          settledAt: new Date().toISOString(),
+          payment: {
+            method: "UPI (GooglePay)",
+            status: "released",
+            booking: { service_request: { title: `Instant UPI Top-up (${upiId})` } },
+          },
         },
         ...prev,
       ]);
@@ -95,18 +100,21 @@ export default function WalletPage() {
 
   const handleWithdraw = () => {
     const amt = Number(withdrawAmount);
-    if (amt > 0 && amt <= walletBalance) {
-      updateWallet(walletBalance - amt);
+    if (amt > 0 && amt <= walletStats.availableBalance) {
+      setWalletStats((prev) => ({
+        ...prev,
+        availableBalance: prev.availableBalance - amt,
+      }));
       setTransactions((prev) => [
         {
           id: `tx-${Date.now()}`,
-          title: "UPI Bank Withdrawal",
-          task: `Transferred to ${upiId}`,
           amount: amt,
-          type: "debit",
-          status: "settled",
-          date: "Just now",
-          method: "Instant IMPS",
+          settledAt: new Date().toISOString(),
+          payment: {
+            method: "IMPS Payout",
+            status: "withdrawn",
+            booking: { service_request: { title: `Direct UPI Withdrawal (${upiId})` } },
+          },
         },
         ...prev,
       ]);
@@ -166,8 +174,8 @@ export default function WalletPage() {
           </div>
           <div>
             <div className="text-3xl sm:text-4xl font-black text-yellow-400 tracking-tight flex items-baseline gap-1">
-              <span>?</span>
-              <span>{walletBalance.toFixed(2)}</span>
+              <span>₹</span>
+              <span>{walletStats.availableBalance.toFixed(2)}</span>
             </div>
             <p className="text-[11px] text-zinc-400 mt-1">
               Ready for instant UPI withdrawal or new task posting.
@@ -187,11 +195,11 @@ export default function WalletPage() {
           </div>
           <div>
             <div className="text-3xl sm:text-4xl font-black text-zinc-900 tracking-tight flex items-baseline gap-1">
-              <span className="text-yellow-500">?</span>
-              <span>{escrowLocked.toFixed(2)}</span>
+              <span className="text-yellow-500">₹</span>
+              <span>{walletStats.escrowHold.toFixed(2)}</span>
             </div>
             <p className="text-[11px] text-zinc-500 mt-1">
-              Held safely for in-progress bookings. Releases upon OTP.
+              Held safely for in-progress bookings. Releases upon completion OTP.
             </p>
           </div>
         </div>
@@ -208,11 +216,11 @@ export default function WalletPage() {
           </div>
           <div>
             <div className="text-3xl sm:text-4xl font-black text-zinc-900 tracking-tight flex items-baseline gap-1">
-              <span className="text-emerald-600">?</span>
-              <span>8,940.00</span>
+              <span className="text-emerald-600">₹</span>
+              <span>{walletStats.totalLifetimeEarnings.toFixed(2)}</span>
             </div>
             <p className="text-[11px] text-zinc-500 mt-1">
-              Total 85% payouts settled across 24 micro-tasks.
+              Total 85% payouts settled across completed micro-tasks.
             </p>
           </div>
         </div>
@@ -245,61 +253,84 @@ export default function WalletPage() {
               Ledger Transactions
             </h3>
           </div>
-          <span className="text-xs text-zinc-400">Showing recent 4 events</span>
+          <span className="text-xs text-zinc-400">
+            {transactions.length} Recorded Ledger Events
+          </span>
         </div>
 
-        <div className="divide-y divide-zinc-100">
-          {transactions.map((tx) => (
-            <div key={tx.id} className="py-3.5 flex items-center justify-between gap-4">
-              <div className="flex items-center gap-3.5">
-                <div
-                  className={`w-10 h-10 rounded-2xl flex items-center justify-center font-bold shrink-0 ${
-                    tx.type === "credit"
-                      ? "bg-emerald-100 text-emerald-800"
-                      : tx.type === "debit"
-                      ? "bg-rose-100 text-rose-800"
-                      : "bg-yellow-100 text-yellow-800"
-                  }`}
-                >
-                  {tx.type === "credit" ? (
-                    <ArrowDownLeft className="w-5 h-5" />
-                  ) : tx.type === "debit" ? (
-                    <ArrowUpRight className="w-5 h-5" />
-                  ) : (
-                    <Lock className="w-5 h-5" />
-                  )}
-                </div>
+        {loading ? (
+          <div className="py-12 text-center">
+            <Loader2 className="w-6 h-6 text-yellow-500 animate-spin mx-auto mb-2" />
+            <p className="text-xs text-zinc-500">Loading ledger transactions...</p>
+          </div>
+        ) : transactions.length > 0 ? (
+          <div className="divide-y divide-zinc-100">
+            {transactions.map((tx) => {
+              const title = tx.payment?.booking?.service_request?.title || "Escrow Settlement";
+              const isHold = tx.payment?.status === "hold";
+              const isWithdrawn = tx.payment?.status === "withdrawn";
 
-                <div>
-                  <h4 className="text-xs font-bold text-zinc-900">{tx.title}</h4>
-                  <p className="text-[11px] text-zinc-500">{tx.task}</p>
-                  <span className="text-[10px] text-zinc-400">{tx.date} � {tx.method}</span>
-                </div>
-              </div>
+              return (
+                <div key={tx.id} className="py-3.5 flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-3.5">
+                    <div
+                      className={`w-10 h-10 rounded-2xl flex items-center justify-center font-bold shrink-0 ${
+                        isHold
+                          ? "bg-yellow-100 text-yellow-800"
+                          : isWithdrawn
+                          ? "bg-rose-100 text-rose-800"
+                          : "bg-emerald-100 text-emerald-800"
+                      }`}
+                    >
+                      {isHold ? (
+                        <Lock className="w-5 h-5" />
+                      ) : isWithdrawn ? (
+                        <ArrowUpRight className="w-5 h-5" />
+                      ) : (
+                        <ArrowDownLeft className="w-5 h-5" />
+                      )}
+                    </div>
 
-              <div className="text-right">
-                <div
-                  className={`text-sm font-black ${
-                    tx.type === "credit"
-                      ? "text-emerald-600"
-                      : tx.type === "debit"
-                      ? "text-rose-600"
-                      : "text-amber-600"
-                  }`}
-                >
-                  {tx.type === "credit" ? "+" : tx.type === "debit" ? "-" : "?? "}?{tx.amount.toFixed(2)}
+                    <div>
+                      <h4 className="text-xs font-bold text-zinc-900">{title}</h4>
+                      <p className="text-[11px] text-zinc-500">
+                        {tx.payment?.method || "UPI Ledger"}
+                      </p>
+                      <span className="text-[10px] text-zinc-400">
+                        {new Date(tx.settledAt).toLocaleString("en-IN")}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="text-right">
+                    <div
+                      className={`text-sm font-black ${
+                        isHold
+                          ? "text-amber-600"
+                          : isWithdrawn
+                          ? "text-rose-600"
+                          : "text-emerald-600"
+                      }`}
+                    >
+                      {isWithdrawn ? "-" : "+"}₹{(tx.amount || 0).toFixed(2)}
+                    </div>
+                    <Badge
+                      variant={isHold ? "warning" : "success"}
+                      size="sm"
+                      className="mt-0.5"
+                    >
+                      {tx.payment?.status || "settled"}
+                    </Badge>
+                  </div>
                 </div>
-                <Badge
-                  variant={tx.status === "settled" ? "success" : "warning"}
-                  size="sm"
-                  className="mt-0.5"
-                >
-                  {tx.status}
-                </Badge>
-              </div>
-            </div>
-          ))}
-        </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="py-12 text-center text-xs text-zinc-400">
+            No transactions yet. Complete tasks to build your financial ledger.
+          </div>
+        )}
       </div>
 
       {/* Deposit Modal */}
@@ -320,7 +351,7 @@ export default function WalletPage() {
               </div>
 
               <Input
-                label="Deposit Amount (? INR)"
+                label="Deposit Amount (₹ INR)"
                 type="number"
                 value={depositAmount}
                 onChange={(e) => setDepositAmount(e.target.value)}
@@ -360,7 +391,7 @@ export default function WalletPage() {
               </div>
 
               <Input
-                label="Withdrawal Amount (? INR)"
+                label="Withdrawal Amount (₹ INR)"
                 type="number"
                 value={withdrawAmount}
                 onChange={(e) => setWithdrawAmount(e.target.value)}

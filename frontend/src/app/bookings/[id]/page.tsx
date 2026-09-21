@@ -1,8 +1,9 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
+import { io, Socket } from "socket.io-client";
 import {
   Zap,
   MapPin,
@@ -16,78 +17,226 @@ import {
   Phone,
   MessageSquare,
   Award,
+  CreditCard,
+  AlertTriangle,
+  Loader2,
 } from "lucide-react";
 import { StatusStepper, BookingStatus } from "@/components/StatusStepper";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { useAppStore } from "@/lib/store";
-import { bookingApi, paymentApi, reviewApi } from "@/lib/api";
+import { bookingApi, paymentApi, reviewApi, SOCKET_URL } from "@/lib/api";
 
 export default function BookingDetailPage() {
   const params = useParams();
   const router = useRouter();
   const bookingId = params?.id as string;
-  const { user, mode } = useAppStore();
+  const { user, token, mode } = useAppStore();
   const isWorker = mode === "worker";
 
   const [booking, setBooking] = useState<any>(null);
-  const [status, setStatus] = useState<BookingStatus>("confirmed");
-  const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState<BookingStatus>("pending");
+  const [loading, setLoading] = useState(true);
+  const [isChatLocked, setIsChatLocked] = useState(true);
   const [otpInput, setOtpInput] = useState("");
-  const [otpVerified, setOtpVerified] = useState(false);
+  const [payingEscrow, setPayingEscrow] = useState(false);
 
   // Chat State
-  const [messages, setMessages] = useState<Array<{ sender: "me" | "them"; text: string; time: string }>>([
-    { sender: "them", text: "Namaste! I have accepted your task. I am on my way.", time: "10:02 AM" },
-    { sender: "me", text: "Great! Please let me know when you reach near the landmark.", time: "10:04 AM" },
-  ]);
+  const [messages, setMessages] = useState<Array<{ id?: string; senderId?: string; senderName?: string; text: string; time: string; isMe: boolean }>>([]);
   const [chatInput, setChatInput] = useState("");
+  const socketRef = useRef<Socket | null>(null);
 
   // Review Modal State
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [rating, setRating] = useState(5);
   const [reviewComment, setReviewComment] = useState("");
+  const [submittingReview, setSubmittingReview] = useState(false);
 
-  const mockOtp = "4829"; // 4-digit verification handshake
+  // Fetch Booking Details from DB
+  const fetchBooking = async () => {
+    try {
+      setLoading(true);
+      const res = await bookingApi.getBookingById(bookingId);
+      const b = res.data.booking;
+      setBooking(b);
+      setStatus(b.status as BookingStatus);
+      setIsChatLocked(b.isChatLocked);
 
+      // Load DB messages if available
+      if (b.chat_messages && b.chat_messages.length > 0) {
+        setMessages(
+          b.chat_messages.map((m: any) => ({
+            id: m.id,
+            senderId: m.senderId,
+            senderName: m.sender?.name || "User",
+            text: m.message,
+            time: new Date(m.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            isMe: m.senderId === user?.id,
+          }))
+        );
+      }
+    } catch (err) {
+      console.error("Error fetching booking:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (bookingId && token) {
+      fetchBooking();
+    }
+  }, [bookingId, token]);
+
+  // Socket.io Real-time Chat Connection
+  useEffect(() => {
+    if (!token || !bookingId) return;
+
+    const socket = io(SOCKET_URL, {
+      auth: { token },
+    });
+
+    socketRef.current = socket;
+
+    socket.on("connect", () => {
+      socket.emit("join_booking", bookingId);
+    });
+
+    socket.on("booking_joined", (data: any) => {
+      setIsChatLocked(data.isLocked);
+    });
+
+    socket.on("new_message", (msg: any) => {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: msg.id,
+          senderId: msg.senderId,
+          senderName: msg.sender?.name || "User",
+          text: msg.message,
+          time: new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          isMe: msg.senderId === user?.id,
+        },
+      ]);
+    });
+
+    return () => {
+      socket.emit("leave_booking", bookingId);
+      socket.disconnect();
+    };
+  }, [bookingId, token, user?.id]);
+
+  // Send Chat Message via Socket.io
   const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!chatInput.trim()) return;
+    if (!chatInput.trim() || isChatLocked) return;
 
-    setMessages((prev) => [
-      ...prev,
-      {
-        sender: "me",
-        text: chatInput.trim(),
-        time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-      },
-    ]);
-    setChatInput("");
+    if (socketRef.current) {
+      socketRef.current.emit("send_message", {
+        bookingId,
+        message: chatInput.trim(),
+      });
+      setChatInput("");
+    }
   };
 
+  // Poster Deposits Escrow via Razorpay
+  const handlePayEscrow = async () => {
+    try {
+      setPayingEscrow(true);
+      // 1. Create Razorpay Order
+      const orderRes = await paymentApi.createRazorpayOrder({
+        bookingId,
+        amount: booking.service_request?.budget || 400,
+      });
+
+      const order = orderRes.data.order;
+
+      // 2. Mock / Real Razorpay Verification
+      const verifyRes = await paymentApi.verifyRazorpayPayment({
+        bookingId,
+        razorpayOrderId: order.id,
+        razorpayPaymentId: `pay_${Date.now()}`,
+        razorpaySignature: "mock_signature_approved",
+        amount: orderRes.data.breakdown.totalAmount,
+      });
+
+      alert("Escrow Payment Secured! Funds locked in Escrow. Chat is now unlocked.");
+      await fetchBooking();
+    } catch (err: any) {
+      alert(err.response?.data?.message || "Failed to process escrow payment.");
+    } finally {
+      setPayingEscrow(false);
+    }
+  };
+
+  // Tasker Starts Task
   const handleStartTask = async () => {
-    if (otpInput !== mockOtp) {
-      alert("Invalid Handshake OTP. Please ask customer for the 4-digit code.");
+    try {
+      await bookingApi.updateStatus(bookingId, { status: "in_progress" });
+      setStatus("in_progress");
+      await fetchBooking();
+    } catch (err: any) {
+      alert(err.response?.data?.message || "Failed to start task.");
+    }
+  };
+
+  // Tasker or Poster Completes Task with 4-Digit Handshake OTP
+  const handleCompleteTask = async () => {
+    if (!otpInput || otpInput.trim().length !== 4) {
+      alert("Please enter the 4-digit Handshake OTP provided by the Customer.");
       return;
     }
-    setOtpVerified(true);
-    setStatus("in_progress");
-  };
 
-  const handleCompleteTask = async () => {
-    setStatus("completed");
-    setShowReviewModal(true);
-  };
-
-  const handleSubmitReview = async () => {
     try {
-      setShowReviewModal(false);
-      alert("Thank you! Review submitted and Escrow funds released to Worker.");
-      router.push("/wallet");
-    } catch (err) {
-      console.error(err);
+      setLoading(true);
+      await bookingApi.updateStatus(bookingId, {
+        status: "completed",
+        otpCode: otpInput.trim(),
+      });
+
+      setStatus("completed");
+      setShowReviewModal(true);
+      await fetchBooking();
+    } catch (err: any) {
+      alert(err.response?.data?.message || "Invalid Handshake OTP code.");
+    } finally {
+      setLoading(false);
     }
   };
+
+  // Submit Mutual Review & Rating
+  const handleSubmitReview = async () => {
+    try {
+      setSubmittingReview(true);
+      await reviewApi.createReview({
+        bookingId,
+        rating,
+        comment: reviewComment.trim() || undefined,
+      });
+      setShowReviewModal(false);
+      alert("Thank you! Review saved and transaction settled.");
+      router.push("/wallet");
+    } catch (err: any) {
+      alert(err.response?.data?.message || "Failed to submit review.");
+    } finally {
+      setSubmittingReview(false);
+    }
+  };
+
+  if (loading && !booking) {
+    return (
+      <div className="py-24 text-center space-y-3">
+        <Loader2 className="w-8 h-8 text-yellow-500 animate-spin mx-auto" />
+        <p className="text-xs font-bold text-zinc-500">Loading booking workspace...</p>
+      </div>
+    );
+  }
+
+  const taskTitle = booking?.service_request?.title || "Hyperlocal Task Booking";
+  const budgetAmount = booking?.service_request?.budget || 400;
+  const handshakeCode = booking?.handshakeOtp || booking?.otpCode || "4829";
+  const isCustomer = booking?.service_request?.customer_profile?.userId === user?.id;
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8 space-y-8">
@@ -102,20 +251,50 @@ export default function BookingDetailPage() {
               ID: {bookingId ? bookingId.slice(0, 8) : "BK-7890"}
             </Badge>
           </div>
-          <h1 className="text-2xl sm:text-3xl font-black text-zinc-950">
-            Medicine & Grocery Urgent Delivery
-          </h1>
+          <h1 className="text-2xl sm:text-3xl font-black text-zinc-950">{taskTitle}</h1>
         </div>
 
         <div className="flex items-center gap-3">
-          <Badge variant="dark" size="md">
-            ?450 Escrow Locked
+          <Badge variant={status === "confirmed" || status === "in_progress" ? "honey" : "dark"} size="md">
+            ₹{budgetAmount} Escrow {status === "pending" ? "Pending" : "Locked"}
           </Badge>
         </div>
       </div>
 
       {/* 4-Step Lifecycle Status Stepper */}
       <StatusStepper currentStatus={status} />
+
+      {/* Escrow Deposit Warning Banner (If Pending) */}
+      {status === "pending" && (
+        <div className="p-6 rounded-3xl bg-amber-50 border-2 border-amber-300 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-6 h-6 text-amber-700 shrink-0 mt-0.5" />
+            <div>
+              <h4 className="text-sm font-black text-amber-950">
+                {isCustomer
+                  ? "Action Required: Lock Escrow Payment to Unlock Task & Chat"
+                  : "Awaiting Customer Escrow Payment Deposit"}
+              </h4>
+              <p className="text-xs text-amber-800 mt-0.5 max-w-xl">
+                {isCustomer
+                  ? "Hold funds safely in Escrow via Razorpay. Tasker will be dispatched and encrypted chat will unlock immediately."
+                  : "The poster is completing payment into Escrow. Chat and start button will unlock once confirmed."}
+              </p>
+            </div>
+          </div>
+
+          {isCustomer && (
+            <Button
+              onClick={handlePayEscrow}
+              isLoading={payingEscrow}
+              className="font-black shadow-honeyGlow shrink-0"
+              leftIcon={<CreditCard className="w-4 h-4" />}
+            >
+              Deposit ₹{budgetAmount} via Razorpay
+            </Button>
+          )}
+        </div>
+      )}
 
       {/* Main Grid: Details + OTP Handshake + Live Chat */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -132,33 +311,37 @@ export default function BookingDetailPage() {
                   </h3>
                 </div>
                 <p className="text-xs text-zinc-400 mt-1 max-w-sm">
-                  {isWorker
-                    ? "Ask the task poster for their 4-digit code to start this job."
-                    : "Share this secret OTP with your tasker only after they arrive."}
+                  {isCustomer
+                    ? "Share this secret OTP with your tasker only after they arrive and finish."
+                    : "Enter the customer's 4-digit code to complete the task and release 85% payout."}
                 </p>
               </div>
 
-              {!isWorker ? (
+              {isCustomer ? (
                 <div className="bg-yellow-400 text-zinc-950 font-black text-2xl tracking-widest px-5 py-2.5 rounded-2xl shadow-honeySmall">
-                  {mockOtp}
+                  {handshakeCode}
                 </div>
-              ) : status === "confirmed" ? (
+              ) : status === "in_progress" ? (
                 <div className="flex items-center gap-2">
                   <input
                     type="text"
-                    placeholder="Enter 4-digit OTP"
+                    placeholder="4-digit OTP"
                     maxLength={4}
                     value={otpInput}
                     onChange={(e) => setOtpInput(e.target.value)}
-                    className="w-36 px-3 py-2 text-center text-zinc-900 font-black tracking-widest rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                    className="w-32 px-3 py-2 text-center text-zinc-900 font-black tracking-widest rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400"
                   />
-                  <Button size="sm" onClick={handleStartTask}>
-                    Verify
+                  <Button size="sm" onClick={handleCompleteTask}>
+                    Verify & Complete
                   </Button>
                 </div>
-              ) : (
+              ) : status === "completed" ? (
                 <Badge variant="success" size="md">
-                  Handshake Verified ?
+                  Handshake Verified ✓
+                </Badge>
+              ) : (
+                <Badge variant="honey" size="sm">
+                  Ready upon arrival
                 </Badge>
               )}
             </div>
@@ -167,53 +350,55 @@ export default function BookingDetailPage() {
           {/* Task Info Bento Box */}
           <div className="rounded-3xl bg-white border border-zinc-200 p-6 space-y-4 shadow-sm">
             <h3 className="text-sm font-black text-zinc-900 uppercase tracking-wider">
-              Task Specifications
+              Task Specifications & Payout Breakdown
             </h3>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
               <div className="p-3.5 rounded-2xl bg-zinc-50 border border-zinc-200/80 space-y-1">
                 <span className="text-zinc-500 font-bold">Location Address</span>
-                <p className="font-extrabold text-zinc-900 flex items-center gap-1.5">
+                <p className="font-extrabold text-zinc-900 flex items-center gap-1.5 truncate">
                   <MapPin className="w-4 h-4 text-yellow-600 shrink-0" />
-                  <span>12th Main Road, Indiranagar, Bengaluru</span>
+                  <span>{booking?.service_request?.address || "Local Vicinity"}</span>
                 </p>
               </div>
 
               <div className="p-3.5 rounded-2xl bg-zinc-50 border border-zinc-200/80 space-y-1">
-                <span className="text-zinc-500 font-bold">Scheduled Window</span>
+                <span className="text-zinc-500 font-bold">Time Window & Urgency</span>
                 <p className="font-extrabold text-zinc-900 flex items-center gap-1.5">
                   <Clock className="w-4 h-4 text-yellow-600 shrink-0" />
-                  <span>Today, 10:30 AM - 11:30 AM</span>
+                  <span>
+                    {booking?.service_request?.timeConstraint || "Within 3 hours"}
+                  </span>
                 </p>
               </div>
             </div>
 
             {/* Action Bar based on Status */}
-            <div className="pt-4 border-t border-zinc-100 flex items-center justify-between">
+            <div className="pt-4 border-t border-zinc-100 flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <ShieldCheck className="w-5 h-5 text-yellow-600" />
                 <span className="text-xs font-bold text-zinc-700">
-                  Escrow Payout: ?382.50 (85%)
+                  Tasker 85% Payout: ₹{(budgetAmount * 0.85).toFixed(2)} (15% Platform Escrow)
                 </span>
               </div>
 
-              {status === "in_progress" && (
-                <Button onClick={handleCompleteTask} variant="primary" size="md" className="font-black">
-                  Mark Task Completed
+              {status === "confirmed" && isWorker && (
+                <Button onClick={handleStartTask} variant="primary" size="md" className="font-black">
+                  Start Working on Task
                 </Button>
               )}
 
               {status === "completed" && (
                 <Button onClick={() => setShowReviewModal(true)} variant="secondary" size="md" className="font-black">
-                  Leave Rating & Review ?
+                  Leave Rating & Review ⭐
                 </Button>
               )}
             </div>
           </div>
         </div>
 
-        {/* Right Col: Live In-App Chat */}
-        <div className="rounded-3xl bg-white border border-zinc-200 shadow-sm flex flex-col h-[520px] overflow-hidden">
+        {/* Right Col: Locked / Unlocked Secure Chat System */}
+        <div className="rounded-3xl bg-white border border-zinc-200 shadow-sm flex flex-col h-[520px] overflow-hidden relative">
           {/* Chat Header */}
           <div className="p-4 bg-zinc-900 text-white border-b border-zinc-800 flex items-center justify-between">
             <div className="flex items-center gap-2.5">
@@ -222,63 +407,88 @@ export default function BookingDetailPage() {
               </div>
               <div>
                 <h4 className="text-xs font-bold text-white">
-                  {isWorker ? "Customer (Pooja V.)" : "Tasker (Ramesh K.)"}
+                  {isWorker
+                    ? booking?.service_request?.customer_profile?.user?.name || "Customer"
+                    : booking?.worker_profile?.user?.name || "Tasker"}
                 </h4>
                 <div className="flex items-center gap-1 text-[10px] text-yellow-400">
                   <Star className="w-3 h-3 fill-yellow-400" />
-                  <span>4.9 (42 tasks)</span>
+                  <span>5.0 Verified Peer</span>
                 </div>
               </div>
             </div>
 
-            <a
-              href="tel:9876543210"
-              className="p-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-yellow-400 transition"
-              title="Call Tasker"
-            >
-              <Phone className="w-4 h-4" />
-            </a>
+            <Badge variant={isChatLocked ? "dark" : "honey"} size="sm">
+              {isChatLocked ? "🔒 Locked" : "⚡ Live Encrypted"}
+            </Badge>
           </div>
 
-          {/* Messages Area */}
-          <div className="flex-1 p-4 overflow-y-auto space-y-3 bg-zinc-50/50 text-xs">
-            {messages.map((msg, idx) => (
-              <div
-                key={idx}
-                className={`flex flex-col ${
-                  msg.sender === "me" ? "items-end" : "items-start"
-                }`}
-              >
-                <div
-                  className={`max-w-[80%] p-3 rounded-2xl font-medium ${
-                    msg.sender === "me"
-                      ? "bg-yellow-400 text-zinc-950 rounded-tr-none shadow-sm"
-                      : "bg-white text-zinc-900 border border-zinc-200 rounded-tl-none shadow-sm"
-                  }`}
-                >
-                  {msg.text}
-                </div>
-                <span className="text-[10px] text-zinc-400 mt-1 px-1">{msg.time}</span>
+          {/* Locked Chat Overlay */}
+          {isChatLocked ? (
+            <div className="flex-1 p-6 flex flex-col items-center justify-center text-center space-y-3 bg-zinc-50/80">
+              <div className="w-12 h-12 rounded-2xl bg-zinc-900 text-yellow-400 flex items-center justify-center">
+                <Lock className="w-6 h-6" />
               </div>
-            ))}
-          </div>
+              <h4 className="text-sm font-black text-zinc-900">Secure Chat is Locked</h4>
+              <p className="text-xs text-zinc-500 max-w-xs">
+                {isCustomer
+                  ? "Chat unlocks instantly as soon as you deposit the escrow payment."
+                  : "Chat unlocks once the poster completes escrow payment on Razorpay."}
+              </p>
+              {isCustomer && (
+                <Button size="sm" onClick={handlePayEscrow} isLoading={payingEscrow}>
+                  Deposit Escrow to Unlock
+                </Button>
+              )}
+            </div>
+          ) : (
+            <>
+              {/* Messages Area */}
+              <div className="flex-1 p-4 overflow-y-auto space-y-3 bg-zinc-50/50 text-xs">
+                {messages.length === 0 ? (
+                  <div className="py-12 text-center text-zinc-400 text-xs">
+                    <MessageSquare className="w-8 h-8 mx-auto mb-2 text-zinc-300" />
+                    <span>Secure chat unlocked. Say hello to your task partner!</span>
+                  </div>
+                ) : (
+                  messages.map((msg, idx) => (
+                    <div
+                      key={msg.id || idx}
+                      className={`flex flex-col ${msg.isMe ? "items-end" : "items-start"}`}
+                    >
+                      <div
+                        className={`max-w-[80%] p-3 rounded-2xl font-medium ${
+                          msg.isMe
+                            ? "bg-yellow-400 text-zinc-950 rounded-tr-none shadow-sm font-semibold"
+                            : "bg-white text-zinc-900 border border-zinc-200 rounded-tl-none shadow-sm"
+                        }`}
+                      >
+                        {msg.text}
+                      </div>
+                      <span className="text-[10px] text-zinc-400 mt-1 px-1">{msg.time}</span>
+                    </div>
+                  ))
+                )}
+              </div>
 
-          {/* Chat Input */}
-          <form onSubmit={handleSendMessage} className="p-3 bg-white border-t border-zinc-200 flex items-center gap-2">
-            <input
-              type="text"
-              placeholder="Type message to tasker..."
-              value={chatInput}
-              onChange={(e) => setChatInput(e.target.value)}
-              className="flex-1 px-4 py-2.5 rounded-xl bg-zinc-100 text-xs font-medium text-zinc-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-yellow-400/30 transition"
-            />
-            <button
-              type="submit"
-              className="p-2.5 rounded-xl bg-yellow-400 hover:bg-yellow-500 text-zinc-950 font-bold transition shadow-sm"
-            >
-              <Send className="w-4 h-4" />
-            </button>
-          </form>
+              {/* Chat Input */}
+              <form onSubmit={handleSendMessage} className="p-3 bg-white border-t border-zinc-200 flex items-center gap-2">
+                <input
+                  type="text"
+                  placeholder="Type message in real-time..."
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  className="flex-1 px-4 py-2.5 rounded-xl bg-zinc-100 text-xs font-medium text-zinc-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-yellow-400/30 transition"
+                />
+                <button
+                  type="submit"
+                  className="p-2.5 rounded-xl bg-yellow-400 hover:bg-yellow-500 text-zinc-950 font-bold transition shadow-sm"
+                >
+                  <Send className="w-4 h-4" />
+                </button>
+              </form>
+            </>
+          )}
         </div>
       </div>
 
@@ -302,7 +512,6 @@ export default function BookingDetailPage() {
                 </p>
               </div>
 
-              {/* Star Selector */}
               <div className="flex items-center justify-center gap-2">
                 {[1, 2, 3, 4, 5].map((s) => (
                   <button
@@ -330,13 +539,17 @@ export default function BookingDetailPage() {
                   rows={3}
                   value={reviewComment}
                   onChange={(e) => setReviewComment(e.target.value)}
-                  placeholder="Super fast delivery, polite and on time..."
+                  placeholder="Super fast service, polite and professional..."
                   className="w-full rounded-2xl border border-zinc-200 p-3 text-xs text-zinc-900 focus:outline-none focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400/20"
                 />
               </div>
 
               <div className="space-y-2">
-                <Button onClick={handleSubmitReview} className="w-full font-black shadow-honeySmall">
+                <Button
+                  onClick={handleSubmitReview}
+                  isLoading={submittingReview}
+                  className="w-full font-black shadow-honeySmall"
+                >
                   Submit Review & Settle Ledger
                 </Button>
                 <button

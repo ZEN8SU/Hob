@@ -9,4 +9,3 @@ router.post("/verify-otp", verifyOtp);
 router.get("/me", authenticateJWT, getMe);
 
 export default router;
-

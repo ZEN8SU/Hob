@@ -1,4 +1,5 @@
 import express, { Request, Response, NextFunction } from "express";
+import http from "http";
 import cors from "cors";
 import dotenv from "dotenv";
 import prisma from "./config/db.js";
@@ -9,14 +10,19 @@ import bookingRoutes from "./routes/bookingRoutes.js";
 import paymentRoutes from "./routes/paymentRoutes.js";
 import reviewRoutes from "./routes/reviewRoutes.js";
 import { errorHandler, notFoundHandler } from "./middlewares/errorHandler.js";
+import { initSocket } from "./socket/socketHandler.js";
 
 dotenv.config();
 
 const app = express();
+const httpServer = http.createServer(app);
 const PORT = Number(process.env.PORT) || 5000;
 
+// Initialize WebSockets (Socket.io)
+initSocket(httpServer);
+
 // Security & Parsing Middlewares
-app.use(cors() as any);
+app.use(cors({ origin: "*" }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -30,8 +36,9 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 app.get("/", (req: Request, res: Response) => {
   res.status(200).json({
     success: true,
-    message: "Hyperlocal P2P Micro-Tasking Platform API is running.",
+    message: "Hyperlocal P2P Micro-Tasking Platform API & Socket.io Gateway is running.",
     version: "1.0.0",
+    theme: "Bumblebee",
     docs: "/health",
   });
 });
@@ -67,12 +74,12 @@ app.use("/api/reviews", reviewRoutes);
 app.use(notFoundHandler);
 app.use(errorHandler);
 
-// Start Server
-const server = app.listen(PORT, () => {
+// Start HTTP + Socket.io Server
+const server = httpServer.listen(PORT, () => {
   console.log(`====================================================`);
-  console.log(`?? Hyperlocal Micro-Task Server live on port ${PORT}`);
-  console.log(`?? Base URL: http://localhost:${PORT}`);
-  console.log(`?? Health Check: http://localhost:${PORT}/health`);
+  console.log(`🐝 Hyperlocal Micro-Task Server & Socket.io live on port ${PORT}`);
+  console.log(`🐝 Base URL: http://localhost:${PORT}`);
+  console.log(`🐝 Health Check: http://localhost:${PORT}/health`);
   console.log(`====================================================`);
 });
 
@@ -87,4 +94,3 @@ process.on("SIGINT", async () => {
 });
 
 export default app;
-

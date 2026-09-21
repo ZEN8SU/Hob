@@ -1,10 +1,12 @@
 import { Router } from "express";
 import {
-  createEscrowPayment,
+  createRazorpayOrder,
+  verifyRazorpayPayment,
   releaseEscrowPayment,
   refundEscrowPayment,
   getPaymentByBooking,
   getMyTransactions,
+  getWalletLedger,
 } from "../controllers/paymentController.js";
 import { authenticateJWT } from "../middlewares/auth.js";
 
@@ -12,11 +14,17 @@ const router = Router();
 
 router.use(authenticateJWT);
 
-router.post("/escrow", createEscrowPayment);
+// Razorpay Order Creation & Verification
+router.post("/create-order", createRazorpayOrder);
+router.post("/verify", verifyRazorpayPayment);
+
+// Escrow Release & Refund
 router.post("/release/:paymentId", releaseEscrowPayment);
 router.post("/refund/:paymentId", refundEscrowPayment);
-router.get("/booking/:bookingId", getPaymentByBooking);
+
+// Wallet Ledger & History
+router.get("/wallet", getWalletLedger);
 router.get("/transactions", getMyTransactions);
+router.get("/booking/:bookingId", getPaymentByBooking);
 
 export default router;
-

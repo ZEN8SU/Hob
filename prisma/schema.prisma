@@ -9,43 +9,57 @@ datasource db {
 }
 
 model user {
-  id         String   @id @default(uuid()) @db.Uuid
+  id         String    @id @default(uuid()) @db.Uuid
   name       String
-  email      String   @unique
-  phone      String   @unique
-  age        Int?     @default(18)
+  email      String    @unique
+  phone      String?
+  age        Int       @default(18)
+  skills     String[]  @default([])
+  avatarUrl  String?
+  role       String    @default("poster") // "poster" | "worker"
   createdAt  DateTime? @default(now())
+  updatedAt  DateTime? @updatedAt
 
   customer_profile customer_profile?
   worker_profile   worker_profile[]
 
-  review_reviewee     review[]      @relation("review_revieweeIdTouser")
-  review_reviewer     review[]      @relation("review_reviewerIdTouser")
-  transaction_payee   transaction[] @relation("transaction_payeeIdTouser")
-  transaction_payer   transaction[] @relation("transaction_payerIdTouser")
+  review_reviewee     review[]       @relation("review_revieweeIdTouser")
+  review_reviewer     review[]       @relation("review_reviewerIdTouser")
+  transaction_payee   transaction[]  @relation("transaction_payeeIdTouser")
+  transaction_payer   transaction[]  @relation("transaction_payerIdTouser")
+  otps                otp[]
+  notifications       notification[]
+  chat_messages       chat_message[] @relation("chat_sender")
 }
 
 model customer_profile {
   id        String  @id @default(uuid()) @db.Uuid
   userId    String  @unique @db.Uuid
   address   String
+  latitude  Float?
+  longitude Float?
   avgRating Float   @default(0)
 
-  user             user               @relation(fields: [userId], references: [id])
-  service_request  service_request[]
+  user            user              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  service_request service_request[]
 }
 
 model worker_profile {
-  id          String  @id @default(uuid()) @db.Uuid
-  userId      String  @db.Uuid
-  skills      String
-  hourlyRate  Float
-  isAvailable Boolean @default(true)
-  avgRating   Float   @default(0)
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @db.Uuid
+  skills      String   @default("")
+  skillsList  String[] @default([])
+  hourlyRate  Float    @default(200)
+  latitude    Float?
+  longitude   Float?
+  address     String?
+  isAvailable Boolean  @default(true)
+  avgRating   Float    @default(0)
 
-  user    user      @relation(fields: [userId], references: [id])
+  user    user      @relation(fields: [userId], references: [id], onDelete: Cascade)
   booking booking[]
   service service[]
+  bids    bid[]
 }
 
 model service {
@@ -55,82 +69,147 @@ model service {
   category String
   baseRate Float
 
-  worker_profile  worker_profile     @relation(fields: [workerId], references: [id])
+  worker_profile  worker_profile    @relation(fields: [workerId], references: [id], onDelete: Cascade)
   service_request service_request[]
 }
 
 model service_request {
-  id           String   @id @default(uuid()) @db.Uuid
-  customerId   String   @db.Uuid
-  serviceId    String?  @db.Uuid
-  status       String   @default("pending")
-  scheduledFor DateTime
-  createdAt    DateTime @default(now())
+  id             String    @id @default(uuid()) @db.Uuid
+  customerId     String    @db.Uuid
+  serviceId      String?   @db.Uuid
+  title          String?
+  description    String?
+  category       String?   @default("Errands")
+  budget         Float?    @default(350)
+  address        String?
+  latitude       Float?
+  longitude      Float?
+  timeConstraint String?
+  status         String    @default("pending") // "pending", "assigned", "in_progress", "completed", "cancelled"
+  scheduledFor   DateTime
+  createdAt      DateTime  @default(now())
 
-  customer_profile customer_profile @relation(fields: [customerId], references: [id])
-  service          service?         @relation(fields: [serviceId], references: [id])
+  customer_profile customer_profile @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  service          service?         @relation(fields: [serviceId], references: [id], onDelete: SetNull)
   booking          booking[]
+  bids             bid[]
+}
+
+model bid {
+  id            String   @id @default(uuid()) @db.Uuid
+  requestId     String   @db.Uuid
+  workerId      String   @db.Uuid
+  proposedPrice Float
+  message       String?
+  status        String   @default("pending") // "pending", "accepted", "rejected"
+  createdAt     DateTime @default(now())
+
+  service_request service_request @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  worker_profile  worker_profile  @relation(fields: [workerId], references: [id], onDelete: Cascade)
 }
 
 model booking {
   id          String    @id @default(uuid()) @db.Uuid
   requestId   String    @db.Uuid
   workerId    String    @db.Uuid
-  status      String    @default("pending")
+  status      String    @default("pending") // "pending", "confirmed", "in_progress", "completed", "cancelled"
+  otpCode     String?   @default("4829")
   startedAt   DateTime?
   completedAt DateTime?
 
-  service_request service_request @relation(fields: [requestId], references: [id])
-  worker_profile  worker_profile  @relation(fields: [workerId], references: [id])
+  service_request service_request @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  worker_profile  worker_profile  @relation(fields: [workerId], references: [id], onDelete: Cascade)
   fee             fee[]
   payment         payment[]
   review          review[]
+  chat_messages   chat_message[]
 }
 
 model fee {
-  id              String  @id @default(uuid()) @db.Uuid
-  bookingId       String  @db.Uuid
+  id              String @id @default(uuid()) @db.Uuid
+  bookingId       String @db.Uuid
   durationMinutes Int
   laborAmount     Float
   platformFee     Float
   totalAmount     Float
 
-  booking booking @relation(fields: [bookingId], references: [id])
+  booking booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
 }
 
 model payment {
-  id        String  @id @default(uuid()) @db.Uuid
-  bookingId String  @db.Uuid
-  amount    Float
-  method    String
-  status    String  @default("pending")
+  id                String   @id @default(uuid()) @db.Uuid
+  bookingId         String   @db.Uuid
+  amount            Float
+  method            String
+  status            String   @default("pending") // "pending", "hold", "released", "refunded"
+  razorpayOrderId   String?
+  razorpayPaymentId String?
+  razorpaySignature String?
+  createdAt         DateTime @default(now())
 
-  booking     booking       @relation(fields: [bookingId], references: [id])
+  booking     booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
   transaction transaction[]
 }
 
 model transaction {
-  id         String   @id @default(uuid()) @db.Uuid
-  paymentId  String   @db.Uuid
-  payerId    String   @db.Uuid
-  payeeId    String   @db.Uuid
-  amount     Float?
-  settledAt  DateTime @default(now())
+  id        String   @id @default(uuid()) @db.Uuid
+  paymentId String   @db.Uuid
+  payerId   String   @db.Uuid
+  payeeId   String   @db.Uuid
+  amount    Float?
+  settledAt DateTime @default(now())
 
-  payment payment @relation(fields: [paymentId], references: [id])
-  payer   user    @relation("transaction_payerIdTouser", fields: [payerId], references: [id])
-  payee   user    @relation("transaction_payeeIdTouser", fields: [payeeId], references: [id])
+  payment payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  payer   user    @relation("transaction_payerIdTouser", fields: [payerId], references: [id], onDelete: Cascade)
+  payee   user    @relation("transaction_payeeIdTouser", fields: [payeeId], references: [id], onDelete: Cascade)
 }
 
 model review {
-  id          String  @id @default(uuid()) @db.Uuid
-  bookingId   String  @db.Uuid
-  reviewerId  String  @db.Uuid
-  revieweeId  String  @db.Uuid
-  rating      Float
-  comment     String?
+  id         String    @id @default(uuid()) @db.Uuid
+  bookingId  String    @db.Uuid
+  reviewerId String    @db.Uuid
+  revieweeId String    @db.Uuid
+  rating     Float
+  comment    String?
+  createdAt  DateTime? @default(now())
 
-  booking  booking @relation(fields: [bookingId], references: [id])
-  reviewer user    @relation("review_reviewerIdTouser", fields: [reviewerId], references: [id])
-  reviewee user    @relation("review_revieweeIdTouser", fields: [revieweeId], references: [id])
+  booking  booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  reviewer user    @relation("review_reviewerIdTouser", fields: [reviewerId], references: [id], onDelete: Cascade)
+  reviewee user    @relation("review_revieweeIdTouser", fields: [revieweeId], references: [id], onDelete: Cascade)
+}
+
+model otp {
+  id        String   @id @default(uuid()) @db.Uuid
+  email     String
+  otp       String
+  expiresAt DateTime
+  verified  Boolean  @default(false)
+  userId    String?  @db.Uuid
+  createdAt DateTime @default(now())
+
+  user user? @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model notification {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  title     String
+  message   String
+  type      String   @default("task_match") // "task_match", "bid_received", "bid_accepted", "escrow_locked", "task_completed"
+  data      Json?
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user user @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model chat_message {
+  id        String   @id @default(uuid()) @db.Uuid
+  bookingId String   @db.Uuid
+  senderId  String   @db.Uuid
+  message   String
+  createdAt DateTime @default(now())
+
+  booking booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  sender  user    @relation("chat_sender", fields: [senderId], references: [id], onDelete: Cascade)
 }

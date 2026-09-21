@@ -1,6 +1,7 @@
 import axios from "axios";
 
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api";
+export const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || "http://localhost:5000";
 
 export const api = axios.create({
   baseURL: API_BASE_URL,
@@ -29,66 +30,143 @@ api.interceptors.response.use(
   (error) => {
     if (error.response?.status === 401) {
       if (typeof window !== "undefined") {
-        localStorage.removeItem("token");
-        localStorage.removeItem("user");
+        // Only clear if on protected pages
+        const isAuthRoute = window.location.pathname === "/login";
+        if (!isAuthRoute) {
+          localStorage.removeItem("token");
+          localStorage.removeItem("user");
+        }
       }
     }
     return Promise.reject(error);
   }
 );
 
-// Specific Backend Integration Service Calls
+// Auth Service Endpoints
 export const authApi = {
-  sendOtp: (phone: string) => api.post("/auth/send-otp", { phone }),
-  verifyOtp: (payload: { phone: string; otp: string; name?: string; email?: string }) =>
-    api.post("/auth/verify-otp", payload),
+  sendOtp: (payload: { email?: string; phone?: string }) => api.post("/auth/send-otp", payload),
+  verifyOtp: (payload: {
+    email?: string;
+    phone?: string;
+    otp: string;
+    name?: string;
+    age?: number;
+    skills?: string[];
+    role?: "poster" | "worker";
+    address?: string;
+  }) => api.post("/auth/verify-otp", payload),
   getMe: () => api.get("/auth/me"),
 };
 
+// User & Profile Service Endpoints
 export const userApi = {
-  upsertCustomerProfile: (address: string) =>
-    api.post("/users/customer-profile", { address }),
-  createWorkerProfile: (payload: { skills: string; hourlyRate: number; isAvailable?: boolean }) =>
-    api.post("/users/worker-profile", payload),
-  updateWorkerProfile: (id: string, payload: Partial<{ skills: string; hourlyRate: number; isAvailable: boolean }>) =>
+  getProfile: () => api.get("/users/profile"),
+  updateProfile: (payload: {
+    name?: string;
+    email?: string;
+    age?: number;
+    skills?: string[];
+    role?: "poster" | "worker";
+    avatarUrl?: string;
+    address?: string;
+    latitude?: number;
+    longitude?: number;
+    hourlyRate?: number;
+    isAvailable?: boolean;
+  }) => api.put("/users/profile", payload),
+  getNotifications: () => api.get("/users/notifications"),
+  markNotificationRead: (id: string) => api.patch(`/users/notifications/${id}/read`),
+  upsertCustomerProfile: (address: string, latitude?: number, longitude?: number) =>
+    api.post("/users/customer-profile", { address, latitude, longitude }),
+  createWorkerProfile: (payload: {
+    skills: string;
+    hourlyRate: number;
+    isAvailable?: boolean;
+    address?: string;
+    latitude?: number;
+    longitude?: number;
+  }) => api.post("/users/worker-profile", payload),
+  updateWorkerProfile: (id: string, payload: any) =>
     api.put(`/users/worker-profile/${id}`, payload),
   getMyProfiles: () => api.get("/users/my-profiles"),
-  getAllWorkers: (params?: { skill?: string; availableOnly?: boolean; minRating?: number }) =>
+  getAllWorkers: (params?: { skill?: string; availableOnly?: boolean }) =>
     api.get("/users/workers", { params }),
   getWorkerById: (id: string) => api.get(`/users/workers/${id}`),
 };
 
+// Service Requests & Tasks Endpoints
 export const serviceApi = {
+  createServiceRequest: (payload: {
+    title: string;
+    category: string;
+    budget: number;
+    description?: string;
+    address: string;
+    latitude?: number;
+    longitude?: number;
+    timeConstraint?: string;
+    scheduledFor: string;
+    serviceId?: string;
+  }) => api.post("/services/requests", payload),
+  getFeed: (params?: {
+    status?: string;
+    category?: string;
+    search?: string;
+    mode?: "poster" | "tasker";
+    latitude?: number;
+    longitude?: number;
+    radius?: number | string;
+  }) => api.get("/services/requests/feed", { params }),
+  getMyRequests: () => api.get("/services/requests/my"),
+  getRequestById: (id: string) => api.get(`/services/requests/${id}`),
   createService: (payload: { title: string; category: string; baseRate: number; workerId?: string }) =>
     api.post("/services", payload),
   getAllServices: (params?: { category?: string; search?: string }) =>
     api.get("/services", { params }),
   getServiceById: (id: string) => api.get(`/services/${id}`),
-  createServiceRequest: (payload: { scheduledFor: string; serviceId?: string; address?: string }) =>
-    api.post("/services/requests", payload),
-  getFeed: (status = "pending") => api.get("/services/requests/feed", { params: { status } }),
-  getMyRequests: () => api.get("/services/requests/my"),
 };
 
+// Bid Management Endpoints
+export const bidApi = {
+  createBid: (taskId: string, payload: { proposedPrice: number; message?: string }) =>
+    api.post(`/services/requests/${taskId}/bids`, payload),
+  getBidsForTask: (taskId: string) => api.get(`/services/requests/${taskId}/bids`),
+  acceptBid: (bidId: string) => api.post(`/services/bids/${bidId}/accept`),
+};
+
+// Booking Service Endpoints
 export const bookingApi = {
   createBooking: (payload: { requestId: string; workerId: string }) =>
     api.post("/bookings", payload),
   getUserBookings: (role?: "customer" | "worker" | "all") =>
     api.get("/bookings", { params: { role } }),
   getBookingById: (id: string) => api.get(`/bookings/${id}`),
-  updateStatus: (id: string, payload: { status: string; durationMinutes?: number; customLaborAmount?: number }) =>
-    api.patch(`/bookings/${id}/status`, payload),
+  updateStatus: (
+    id: string,
+    payload: { status: string; otpCode?: string; durationMinutes?: number; customLaborAmount?: number }
+  ) => api.patch(`/bookings/${id}/status`, payload),
 };
 
+// Payments & Escrow Endpoints
 export const paymentApi = {
-  createEscrow: (payload: { bookingId: string; amount: number; method?: string }) =>
-    api.post("/payments/escrow", payload),
+  createRazorpayOrder: (payload: { bookingId: string; amount?: number }) =>
+    api.post("/payments/create-order", payload),
+  verifyRazorpayPayment: (payload: {
+    bookingId: string;
+    razorpayOrderId: string;
+    razorpayPaymentId: string;
+    razorpaySignature?: string;
+    amount?: number;
+    method?: string;
+  }) => api.post("/payments/verify", payload),
   releaseEscrow: (paymentId: string) => api.post(`/payments/release/${paymentId}`),
   refundEscrow: (paymentId: string) => api.post(`/payments/refund/${paymentId}`),
-  getPaymentByBooking: (bookingId: string) => api.get(`/payments/booking/${bookingId}`),
+  getWalletLedger: () => api.get("/payments/wallet"),
   getMyTransactions: () => api.get("/payments/transactions"),
+  getPaymentByBooking: (bookingId: string) => api.get(`/payments/booking/${bookingId}`),
 };
 
+// Reviews Endpoints
 export const reviewApi = {
   createReview: (payload: { bookingId: string; rating: number; comment?: string }) =>
     api.post("/reviews", payload),
@@ -97,4 +175,3 @@ export const reviewApi = {
 };
 
 export default api;
-

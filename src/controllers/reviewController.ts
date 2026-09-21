@@ -28,8 +28,10 @@ export const createReview = async (
       throw new ApiError(400, "Rating must be a number between 1 and 5.");
     }
 
+    const cleanBookingId = String(bookingId);
+
     const booking = await prisma.booking.findUnique({
-      where: { id: bookingId },
+      where: { id: cleanBookingId },
       include: {
         service_request: {
           include: { customer_profile: true },
@@ -53,14 +55,12 @@ export const createReview = async (
       throw new ApiError(403, "You are not a participant in this booking.");
     }
 
-    // Determine reviewee (target of review)
     const isCustomerReviewing = userId === customerUserId;
     const revieweeId = isCustomerReviewing ? workerUserId : customerUserId;
 
-    // Check if reviewer has already reviewed this booking
     const existingReview = await prisma.review.findFirst({
       where: {
-        bookingId,
+        bookingId: cleanBookingId,
         reviewerId: userId,
       },
     });
@@ -69,10 +69,9 @@ export const createReview = async (
       throw new ApiError(400, "You have already submitted a review for this booking.");
     }
 
-    // Create review and recalculate avgRating
     const review = await prisma.review.create({
       data: {
-        bookingId,
+        bookingId: cleanBookingId,
         reviewerId: userId,
         revieweeId,
         rating: numericRating,
@@ -84,7 +83,6 @@ export const createReview = async (
       },
     });
 
-    // Recalculate average rating for reviewee
     const allReviewsForReviewee = await prisma.review.findMany({
       where: { revieweeId },
       select: { rating: true },
@@ -95,13 +93,11 @@ export const createReview = async (
     const newAvgRating = Number((sumRatings / totalRatings).toFixed(2));
 
     if (isCustomerReviewing) {
-      // Customer reviewed Worker -> Update worker_profile avgRating
       await prisma.worker_profile.updateMany({
         where: { userId: revieweeId },
         data: { avgRating: newAvgRating },
       });
     } else {
-      // Worker reviewed Customer -> Update customer_profile avgRating
       await prisma.customer_profile.updateMany({
         where: { userId: revieweeId },
         data: { avgRating: newAvgRating },
@@ -130,7 +126,7 @@ export const getReviewsForUser = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    const { userId } = req.params;
+    const userId = String(req.params.userId);
     if (!userId) throw new ApiError(400, "User ID is required.");
 
     const reviews = await prisma.review.findMany({
@@ -173,7 +169,7 @@ export const getReviewsForBooking = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    const { bookingId } = req.params;
+    const bookingId = String(req.params.bookingId);
     if (!bookingId) throw new ApiError(400, "Booking ID is required.");
 
     const reviews = await prisma.review.findMany({
@@ -193,4 +189,3 @@ export const getReviewsForBooking = async (
     next(error);
   }
 };
-
