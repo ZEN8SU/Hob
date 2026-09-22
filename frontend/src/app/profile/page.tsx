@@ -20,6 +20,10 @@ import {
   Loader2,
   AlertCircle,
   Briefcase,
+  Phone,
+  Plus,
+  X,
+  Image as ImageIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -27,7 +31,7 @@ import { Badge } from "@/components/ui/Badge";
 import { useAppStore } from "@/lib/store";
 import { userApi, paymentApi } from "@/lib/api";
 
-const ALL_SKILLS = [
+const PREDEFINED_SKILLS = [
   "Typing",
   "Shifting",
   "Cleaning",
@@ -38,6 +42,8 @@ const ALL_SKILLS = [
   "Plant Care",
   "Electrical",
   "Carpentry",
+  "Cooking",
+  "Pet Care",
 ];
 
 export default function ProfilePage() {
@@ -52,9 +58,12 @@ export default function ProfilePage() {
   // Form State
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
   const [age, setAge] = useState("22");
+  const [avatarUrl, setAvatarUrl] = useState("");
   const [address, setAddress] = useState("");
   const [skills, setSkills] = useState<string[]>([]);
+  const [customSkillInput, setCustomSkillInput] = useState("");
   const [hourlyRate, setHourlyRate] = useState("250");
   const [isAvailable, setIsAvailable] = useState(true);
 
@@ -73,9 +82,11 @@ export default function ProfilePage() {
 
       setName(p.name || "");
       setEmail(p.email || "");
+      setPhone(p.phone || "");
       setAge(String(p.age || 21));
+      setAvatarUrl(p.avatarUrl || "");
       setAddress(p.customerProfile?.address || p.workerProfile?.address || "Indiranagar, Bengaluru");
-      setSkills(p.skills || (p.workerProfile?.skillsList) || ["Delivery", "Errands"]);
+      setSkills(p.skills || p.workerProfile?.skillsList || ["Delivery", "Errands"]);
       setHourlyRate(String(p.workerProfile?.hourlyRate || 250));
       setIsAvailable(p.workerProfile?.isAvailable !== undefined ? p.workerProfile.isAvailable : true);
 
@@ -86,6 +97,7 @@ export default function ProfilePage() {
       updateUser({
         name: p.name,
         email: p.email,
+        phone: p.phone,
         age: p.age,
         skills: p.skills,
         avgRating: p.avgRating,
@@ -114,6 +126,28 @@ export default function ProfilePage() {
     );
   };
 
+  const handleAddCustomSkill = (e?: React.FormEvent | React.KeyboardEvent) => {
+    if (e) e.preventDefault();
+    const clean = customSkillInput.trim();
+    if (!clean) return;
+
+    if (!skills.some((s) => s.toLowerCase() === clean.toLowerCase())) {
+      setSkills((prev) => [...prev, clean]);
+    }
+    setCustomSkillInput("");
+  };
+
+  const handleCustomSkillKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" || e.key === ",") {
+      e.preventDefault();
+      handleAddCustomSkill();
+    }
+  };
+
+  const removeSkill = (skillToRemove: string) => {
+    setSkills((prev) => prev.filter((s) => s !== skillToRemove));
+  };
+
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
     setSuccessMessage(null);
@@ -121,12 +155,13 @@ export default function ProfilePage() {
 
     try {
       setSaving(true);
-      const res = await userApi.updateProfile({
+      await userApi.updateProfile({
         name: name.trim(),
         email: email.trim().toLowerCase(),
         age: parseInt(age, 10),
         skills,
         address: address.trim(),
+        avatarUrl: avatarUrl.trim() || undefined,
         hourlyRate: Number(hourlyRate),
         isAvailable,
       });
@@ -135,6 +170,7 @@ export default function ProfilePage() {
       updateUser({
         name: name.trim(),
         email: email.trim().toLowerCase(),
+        phone: phone.trim() || null,
         age: parseInt(age, 10),
         skills,
       });
@@ -164,8 +200,12 @@ export default function ProfilePage() {
 
         <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
           <div className="flex items-center gap-4">
-            <div className="w-16 h-16 rounded-3xl bg-yellow-400 text-zinc-950 font-black text-2xl flex items-center justify-center shadow-honeyGlow border-2 border-zinc-950">
-              {name ? name[0]?.toUpperCase() : "U"}
+            <div className="w-16 h-16 rounded-3xl bg-yellow-400 text-zinc-950 font-black text-2xl flex items-center justify-center shadow-honeyGlow border-2 border-zinc-950 overflow-hidden">
+              {avatarUrl ? (
+                <img src={avatarUrl} alt={name} className="w-full h-full object-cover" />
+              ) : (
+                <span>{name ? name[0]?.toUpperCase() : "U"}</span>
+              )}
             </div>
             <div>
               <div className="flex items-center gap-2">
@@ -174,7 +214,9 @@ export default function ProfilePage() {
                   {mode === "poster" ? "Task Poster" : "Active Tasker"}
                 </Badge>
               </div>
-              <p className="text-xs text-zinc-400 mt-0.5">{email} • Age: {age} yrs</p>
+              <p className="text-xs text-zinc-400 mt-0.5">
+                {email} • Age: {age} yrs {phone ? `• ${phone}` : ""}
+              </p>
               <div className="flex items-center gap-1 text-yellow-400 text-xs font-bold mt-1">
                 <Star className="w-3.5 h-3.5 fill-current" />
                 <span>5.0 Peer Rating</span>
@@ -292,6 +334,22 @@ export default function ProfilePage() {
             />
 
             <Input
+              label="Phone Number"
+              type="tel"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              leftIcon={<Phone className="w-4 h-4" />}
+            />
+
+            <Input
+              label="Avatar Image URL (Optional)"
+              value={avatarUrl}
+              onChange={(e) => setAvatarUrl(e.target.value)}
+              placeholder="https://images.unsplash.com/..."
+              leftIcon={<ImageIcon className="w-4 h-4" />}
+            />
+
+            <Input
               label="Hourly Base Rate (₹ INR)"
               type="number"
               value={hourlyRate}
@@ -308,26 +366,76 @@ export default function ProfilePage() {
             required
           />
 
-          {/* Manage Skill Tags */}
-          <div>
-            <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-2">
-              Manage Skill Tags (For Tasker Discovery)
-            </label>
-            <div className="flex flex-wrap gap-2">
-              {ALL_SKILLS.map((skill) => {
+          {/* Manage Skill Tags with Predefined + Custom Typing */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider">
+                Manage Skills & Tags (For Tasker Matching)
+              </label>
+              <span className="text-[11px] text-zinc-500 font-medium">
+                {skills.length} active tags
+              </span>
+            </div>
+
+            {/* Active Selected Skill Badges */}
+            {skills.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 p-3 rounded-2xl bg-zinc-50 border border-zinc-200">
+                {skills.map((skill) => (
+                  <span
+                    key={skill}
+                    className="inline-flex items-center gap-1 px-3 py-1 rounded-xl bg-yellow-400 text-zinc-950 text-xs font-extrabold border border-yellow-500 shadow-sm"
+                  >
+                    <span>{skill}</span>
+                    <button
+                      type="button"
+                      onClick={() => removeSkill(skill)}
+                      className="text-zinc-900 hover:text-rose-700 ml-0.5"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Custom Skill Input Box */}
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                placeholder="Type a custom skill (e.g. Video Editing, Painting) and press Enter..."
+                value={customSkillInput}
+                onChange={(e) => setCustomSkillInput(e.target.value)}
+                onKeyDown={handleCustomSkillKeyDown}
+                className="flex-1 px-4 py-2.5 rounded-2xl bg-white border border-zinc-200 text-xs font-medium focus:outline-none focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400/20"
+              />
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => handleAddCustomSkill()}
+                className="text-xs font-bold shrink-0"
+                leftIcon={<Plus className="w-3.5 h-3.5" />}
+              >
+                Add Tag
+              </Button>
+            </div>
+
+            {/* Predefined Tag Selector */}
+            <div className="flex flex-wrap gap-1.5">
+              {PREDEFINED_SKILLS.map((skill) => {
                 const isSelected = skills.includes(skill);
                 return (
                   <button
                     key={skill}
                     type="button"
                     onClick={() => toggleSkill(skill)}
-                    className={`px-3.5 py-2 rounded-xl text-xs font-bold transition border ${
+                    className={`px-3 py-1.5 rounded-xl font-bold text-xs transition border ${
                       isSelected
-                        ? "bg-yellow-400 text-zinc-950 border-yellow-500 shadow-honeySmall font-extrabold"
-                        : "bg-zinc-50 text-zinc-600 border-zinc-200 hover:bg-zinc-100"
+                        ? "bg-zinc-900 text-yellow-400 border-zinc-900"
+                        : "bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-100 hover:text-zinc-900"
                     }`}
                   >
-                    {skill} {isSelected && "✓"}
+                    {skill} {isSelected ? "✓" : "+"}
                   </button>
                 );
               })}

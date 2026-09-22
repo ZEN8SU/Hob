@@ -4,6 +4,7 @@ import prisma from "../config/db.js";
 import { ApiError } from "../middlewares/errorHandler.js";
 import { AuthenticatedRequest } from "../middlewares/auth.js";
 import { sendOtpEmail } from "../services/emailService.js";
+import { hashPassword, verifyPassword } from "../utils/password.js";
 
 const DEFAULT_DEV_OTP = "123456";
 
@@ -12,6 +13,193 @@ const DEFAULT_DEV_OTP = "123456";
  */
 const generateOtpCode = (): string => {
   return Math.floor(100000 + Math.random() * 900000).toString();
+};
+
+/**
+ * Generate standard JWT Auth Token
+ */
+const generateJwtToken = (user: { id: string; email: string; role: string }): string => {
+  const secret = process.env.JWT_SECRET || "super_secret_jwt_key_hyperlocal_2025";
+  return jwt.sign(
+    {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+    },
+    secret,
+    { expiresIn: "30d" }
+  );
+};
+
+/**
+ * @desc   Sign Up with Email, Password, Name, Mandatory Age (18+), Phone, Skills, Role
+ * @route  POST /api/auth/signup
+ * @access Public
+ */
+export const signup = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { email, password, name, age, phone, skills, role = "poster", address } = req.body;
+
+    if (!email || !String(email).trim() || !String(email).includes("@")) {
+      throw new ApiError(400, "A valid email address is required.");
+    }
+
+    if (!password || String(password).length < 6) {
+      throw new ApiError(400, "Password is required and must be at least 6 characters.");
+    }
+
+    if (!name || !String(name).trim()) {
+      throw new ApiError(400, "Full Name is required.");
+    }
+
+    const parsedAge = parseInt(String(age), 10);
+    if (age === undefined || age === null || isNaN(parsedAge) || parsedAge < 18) {
+      throw new ApiError(400, "Age is mandatory and you must be 18 years or older.");
+    }
+
+    const cleanEmail = String(email).trim().toLowerCase();
+    const cleanPhone = phone ? String(phone).trim() : null;
+    const cleanName = String(name).trim();
+    const userRole = role === "worker" ? "worker" : "poster";
+
+    const existingUser = await prisma.user.findUnique({
+      where: { email: cleanEmail },
+    });
+
+    if (existingUser) {
+      throw new ApiError(400, "An account with this email already exists. Please log in.");
+    }
+
+    const hashedPassword = await hashPassword(String(password));
+
+    const parsedSkills: string[] = Array.isArray(skills)
+      ? skills.map((s) => String(s).trim()).filter(Boolean)
+      : typeof skills === "string" && skills.trim()
+      ? skills.split(",").map((s) => s.trim()).filter(Boolean)
+      : userRole === "worker"
+      ? ["Delivery", "Errands"]
+      : [];
+
+    const user = await prisma.user.create({
+      data: {
+        email: cleanEmail,
+        password: hashedPassword,
+        name: cleanName,
+        age: parsedAge,
+        phone: cleanPhone,
+        skills: parsedSkills,
+        role: userRole,
+        customer_profile: {
+          create: {
+            address: address?.trim() || "Indiranagar, Bengaluru",
+            avgRating: 5.0,
+          },
+        },
+        worker_profile: {
+          create: {
+            skills: parsedSkills.join(", "),
+            skillsList: parsedSkills,
+            hourlyRate: 250,
+            isAvailable: true,
+            avgRating: 5.0,
+            address: address?.trim() || "Indiranagar, Bengaluru",
+          },
+        },
+      },
+      include: {
+        customer_profile: true,
+        worker_profile: true,
+      },
+    });
+
+    const token = generateJwtToken(user);
+
+    res.status(201).json({
+      success: true,
+      message: "Account created successfully.",
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        age: user.age,
+        skills: user.skills,
+        role: user.role,
+        avatarUrl: user.avatarUrl,
+        customerProfile: user.customer_profile,
+        workerProfiles: user.worker_profile,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc   Login with Email + Password
+ * @route  POST /api/auth/login
+ * @access Public
+ */
+export const login = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !String(email).trim()) {
+      throw new ApiError(400, "Email is required.");
+    }
+    if (!password || !String(password).trim()) {
+      throw new ApiError(400, "Password is required.");
+    }
+
+    const cleanEmail = String(email).trim().toLowerCase();
+
+    const user = await prisma.user.findUnique({
+      where: { email: cleanEmail },
+      include: {
+        customer_profile: true,
+        worker_profile: true,
+      },
+    });
+
+    if (!user) {
+      throw new ApiError(401, "Invalid email or password.");
+    }
+
+    if (!user.password) {
+      throw new ApiError(
+        400,
+        "No password is set for this account. Please use 'Login with Email OTP' or update your password in Profile."
+      );
+    }
+
+    const isMatch = await verifyPassword(String(password), user.password);
+    if (!isMatch) {
+      throw new ApiError(401, "Invalid email or password.");
+    }
+
+    const token = generateJwtToken(user);
+
+    res.status(200).json({
+      success: true,
+      message: "Login successful.",
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        age: user.age,
+        skills: user.skills,
+        role: user.role,
+        avatarUrl: user.avatarUrl,
+        customerProfile: user.customer_profile,
+        workerProfiles: user.worker_profile,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
 };
 
 /**
@@ -199,26 +387,16 @@ export const verifyOtp = async (req: Request, res: Response, next: NextFunction)
       }
 
       // Refresh user object with profiles
-      user = await prisma.user.findUnique({
+      user = (await prisma.user.findUnique({
         where: { id: user.id },
         include: {
           customer_profile: true,
           worker_profile: true,
         },
-      }) as any;
+      })) as any;
     }
 
-    // Generate JWT Auth Token
-    const secret = process.env.JWT_SECRET || "super_secret_jwt_key_hyperlocal_2025";
-    const token = jwt.sign(
-      {
-        id: user!.id,
-        email: user!.email,
-        role: user!.role,
-      },
-      secret,
-      { expiresIn: "30d" }
-    );
+    const token = generateJwtToken(user!);
 
     res.status(200).json({
       success: true,

@@ -408,3 +408,87 @@ export const getUserBookings = async (
     next(error);
   }
 };
+
+/**
+ * @desc   Get All Active Bookings / Deals (Pending Escrow, Confirmed, In Progress) for Authenticated User
+ * @route  GET /api/bookings/active
+ * @access Private
+ */
+export const getActiveBookings = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) throw new ApiError(401, "Unauthorized");
+
+    const customerProfile = await prisma.customer_profile.findUnique({
+      where: { userId },
+    });
+
+    const workerProfiles = await prisma.worker_profile.findMany({
+      where: { userId },
+    });
+
+    const workerProfileIds = workerProfiles.map((w) => w.id);
+
+    const activeStatuses = ["pending", "confirmed", "in_progress"];
+
+    const bookings = await prisma.booking.findMany({
+      where: {
+        status: { in: activeStatuses },
+        OR: [
+          ...(customerProfile ? [{ service_request: { customerId: customerProfile.id } }] : []),
+          ...(workerProfileIds.length > 0 ? [{ workerId: { in: workerProfileIds } }] : []),
+        ],
+      },
+      include: {
+        service_request: {
+          include: {
+            customer_profile: {
+              include: { user: { select: { id: true, name: true, phone: true, email: true, avatarUrl: true } } },
+            },
+          },
+        },
+        worker_profile: {
+          include: { user: { select: { id: true, name: true, phone: true, email: true, avatarUrl: true } } },
+        },
+        payment: {
+          include: { transaction: true },
+        },
+        fee: true,
+        chat_messages: {
+          take: 5,
+          orderBy: { createdAt: "desc" },
+          include: {
+            sender: { select: { id: true, name: true } },
+          },
+        },
+      },
+      orderBy: { id: "desc" },
+    });
+
+    const processedBookings = bookings.map((b) => {
+      const isCustomer = b.service_request.customer_profile.userId === userId;
+      const allowedChatStatuses = ["confirmed", "in_progress", "completed"];
+      const isChatLocked = !allowedChatStatuses.includes(b.status.toLowerCase());
+      return {
+        ...b,
+        socketRoomId: `booking:${b.id}`,
+        isChatLocked,
+        handshakeOtp: isCustomer ? b.otpCode : undefined,
+        roleInBooking: isCustomer ? "customer" : "worker",
+      };
+    });
+
+    res.status(200).json({
+      success: true,
+      count: processedBookings.length,
+      bookings: processedBookings,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+

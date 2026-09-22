@@ -191,7 +191,17 @@ export const getAllServiceRequests = async (
       ];
     }
 
-    if (mode === "poster" && currentUserId) {
+    if (mode === "poster") {
+      if (!currentUserId) {
+        res.status(200).json({
+          success: true,
+          count: 0,
+          mode,
+          appliedRadiusKm: null,
+          requests: [],
+        });
+        return;
+      }
       whereClause.customer_profile = {
         userId: currentUserId,
       };

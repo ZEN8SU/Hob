@@ -271,3 +271,73 @@ export const acceptBid = async (
     next(error);
   }
 };
+
+/**
+ * @desc   Poster rejects a specific Bid
+ * @route  POST /api/services/bids/:id/reject
+ * @access Private (Poster)
+ */
+export const rejectBid = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) throw new ApiError(401, "Unauthorized");
+
+    const bidId = String(req.params.id);
+    if (!bidId) throw new ApiError(400, "Bid ID is required.");
+
+    const bid = await prisma.bid.findUnique({
+      where: { id: bidId },
+      include: {
+        service_request: {
+          include: { customer_profile: true },
+        },
+        worker_profile: {
+          include: { user: true },
+        },
+      },
+    });
+
+    if (!bid) {
+      throw new ApiError(404, "Bid not found.");
+    }
+
+    if (bid.service_request.customer_profile.userId !== userId) {
+      throw new ApiError(403, "Only the task poster can reject this bid.");
+    }
+
+    const updatedBid = await prisma.bid.update({
+      where: { id: bidId },
+      data: { status: "rejected" },
+    });
+
+    const workerUserId = bid.worker_profile.userId;
+    const taskTitle = bid.service_request.title || "Micro-Task";
+    const notification = await prisma.notification.create({
+      data: {
+        userId: workerUserId,
+        title: "Bid Update",
+        message: `Your bid for task "${taskTitle}" was not accepted.`,
+        type: "bid_rejected",
+        data: {
+          taskId: bid.requestId,
+          bidId: bid.id,
+        },
+      },
+    });
+
+    emitNotificationToUser(workerUserId, notification);
+
+    res.status(200).json({
+      success: true,
+      message: "Bid rejected. Worker has been notified.",
+      bid: updatedBid,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+

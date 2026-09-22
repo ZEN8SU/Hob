@@ -265,11 +265,18 @@ export const Navbar: React.FC = () => {
                 </button>
               </div>
             ) : (
-              <Link href="/login">
-                <Button size="sm" variant="primary">
-                  Login / Join
-                </Button>
-              </Link>
+              <div className="flex items-center gap-2">
+                <Link href="/login">
+                  <Button size="sm" variant="outline" className="text-xs font-bold">
+                    Login
+                  </Button>
+                </Link>
+                <Link href="/signup">
+                  <Button size="sm" variant="primary" className="text-xs font-bold shadow-honeySmall">
+                    Sign Up
+                  </Button>
+                </Link>
+              </div>
             )}
           </div>
 
@@ -338,9 +345,18 @@ export const Navbar: React.FC = () => {
                   Logout
                 </button>
               ) : (
-                <Link href="/login" onClick={() => setIsMobileMenuOpen(false)}>
-                  <Button size="sm">Login</Button>
-                </Link>
+                <div className="flex items-center gap-2">
+                  <Link href="/login" onClick={() => setIsMobileMenuOpen(false)}>
+                    <Button size="sm" variant="outline" className="text-xs">
+                      Login
+                    </Button>
+                  </Link>
+                  <Link href="/signup" onClick={() => setIsMobileMenuOpen(false)}>
+                    <Button size="sm" variant="primary" className="text-xs font-bold shadow-honeySmall">
+                      Sign Up
+                    </Button>
+                  </Link>
+                </div>
               )}
             </div>
           </motion.div>

@@ -30,8 +30,8 @@ api.interceptors.response.use(
   (error) => {
     if (error.response?.status === 401) {
       if (typeof window !== "undefined") {
-        // Only clear if on protected pages
-        const isAuthRoute = window.location.pathname === "/login";
+        const isAuthRoute =
+          window.location.pathname === "/login" || window.location.pathname === "/signup";
         if (!isAuthRoute) {
           localStorage.removeItem("token");
           localStorage.removeItem("user");
@@ -44,6 +44,17 @@ api.interceptors.response.use(
 
 // Auth Service Endpoints
 export const authApi = {
+  signup: (payload: {
+    email: string;
+    password: string;
+    name: string;
+    age: number;
+    phone?: string;
+    skills?: string[];
+    role?: "poster" | "worker";
+    address?: string;
+  }) => api.post("/auth/signup", payload),
+  login: (payload: { email: string; password: string }) => api.post("/auth/login", payload),
   sendOtp: (payload: { email?: string; phone?: string }) => api.post("/auth/send-otp", payload),
   verifyOtp: (payload: {
     email?: string;
@@ -132,12 +143,14 @@ export const bidApi = {
     api.post(`/services/requests/${taskId}/bids`, payload),
   getBidsForTask: (taskId: string) => api.get(`/services/requests/${taskId}/bids`),
   acceptBid: (bidId: string) => api.post(`/services/bids/${bidId}/accept`),
+  rejectBid: (bidId: string) => api.post(`/services/bids/${bidId}/reject`),
 };
 
 // Booking Service Endpoints
 export const bookingApi = {
   createBooking: (payload: { requestId: string; workerId: string }) =>
     api.post("/bookings", payload),
+  getActiveBookings: () => api.get("/bookings/active"),
   getUserBookings: (role?: "customer" | "worker" | "all") =>
     api.get("/bookings", { params: { role } }),
   getBookingById: (id: string) => api.get(`/bookings/${id}`),

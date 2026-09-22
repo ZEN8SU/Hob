@@ -8,7 +8,7 @@ import {
   getMyServiceRequests,
   getServiceRequestById,
 } from "../controllers/serviceController.js";
-import { createBid, getBidsForTask, acceptBid } from "../controllers/bidController.js";
+import { createBid, getBidsForTask, acceptBid, rejectBid } from "../controllers/bidController.js";
 import { authenticateJWT } from "../middlewares/auth.js";
 
 const router = Router();
@@ -35,6 +35,7 @@ router.get("/requests/:id", getServiceRequestById);
 router.post("/requests/:id/bids", authenticateJWT, createBid);
 router.get("/requests/:id/bids", authenticateJWT, getBidsForTask);
 router.post("/bids/:id/accept", authenticateJWT, acceptBid);
+router.post("/bids/:id/reject", authenticateJWT, rejectBid);
 
 router.get("/:id", getServiceById);
 
