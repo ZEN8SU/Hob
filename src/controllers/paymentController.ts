@@ -6,6 +6,24 @@ import { createRazorpayOrder as createRzpOrder, verifyRazorpaySignature } from "
 import { emitNotificationToUser } from "../socket/socketHandler.js";
 
 const PLATFORM_FEE_PERCENT = parseFloat(process.env.PLATFORM_FEE_PERCENTAGE || "15");
+const INITIAL_SANDBOX_BALANCE = 5000.0;
+
+export interface NormalizedLedgerTransaction {
+  id: string;
+  paymentId: string;
+  type: "CREDIT" | "DEBIT" | "ESCROW_HOLD" | "ESCROW_RELEASE";
+  amount: number;
+  rawAmount: number;
+  status: "SUCCESS" | "ESCROW_HOLD" | "ESCROW_RELEASED" | "REFUNDED" | "PENDING";
+  description: string;
+  method: string;
+  settledAt: string | Date;
+  taskTitle: string;
+  role: "poster" | "tasker";
+  payer: { id?: string; name?: string; phone?: string | null };
+  payee: { id?: string; name?: string; phone?: string | null };
+  payment: any;
+}
 
 /**
  * @desc   Create Razorpay Order for Accepted Booking
@@ -140,6 +158,7 @@ export const verifyRazorpayPayment = async (
     const totalAmount = amount ? Number(amount) : (booking.service_request.budget || 400);
 
     const result = await prisma.$transaction(async (tx) => {
+      // 1. Create Payment in 'hold' status (Escrow Hold)
       const payment = await tx.payment.create({
         data: {
           bookingId: cleanBookingId,
@@ -152,6 +171,7 @@ export const verifyRazorpayPayment = async (
         },
       });
 
+      // 2. Create Double-entry Transaction record for Escrow Lock
       const transaction = await tx.transaction.create({
         data: {
           paymentId: payment.id,
@@ -162,6 +182,7 @@ export const verifyRazorpayPayment = async (
         },
       });
 
+      // 3. Confirm booking and start task lifecycle
       const updatedBooking = await tx.booking.update({
         where: { id: cleanBookingId },
         data: { status: "confirmed" },
@@ -175,6 +196,7 @@ export const verifyRazorpayPayment = async (
       return { payment, transaction, updatedBooking };
     });
 
+    // Notify Tasker that funds are safely held in Escrow
     const notification = await prisma.notification.create({
       data: {
         userId: workerUserId,
@@ -251,11 +273,13 @@ export const releaseEscrowPayment = async (
     const workerPayout = Number((totalAmount - platformCommission).toFixed(2));
 
     const updated = await prisma.$transaction(async (tx) => {
+      // 1. Mark payment as released
       const updatedPayment = await tx.payment.update({
         where: { id: paymentId },
         data: { status: "released" },
       });
 
+      // 2. Record Worker Payout Credit Transaction
       const workerPayoutTx = await tx.transaction.create({
         data: {
           paymentId: payment.id,
@@ -278,6 +302,18 @@ export const releaseEscrowPayment = async (
         transaction: workerPayoutTx,
       };
     });
+
+    // Notify Worker of credited wallet payout
+    const notification = await prisma.notification.create({
+      data: {
+        userId: workerUserId,
+        title: `₹${workerPayout} Credited to Wallet! 🎉`,
+        message: `Task completed and 85% payout released for "${payment.booking.service_request.title || "Task"}".`,
+        type: "task_completed",
+        data: { bookingId: payment.booking.id, amount: workerPayout },
+      },
+    });
+    emitNotificationToUser(workerUserId, notification);
 
     res.status(200).json({
       success: true,
@@ -328,17 +364,20 @@ export const refundEscrowPayment = async (
     }
 
     const customerUserId = payment.booking.service_request.customer_profile.userId;
+    const workerUserId = payment.booking.worker_profile.userId;
 
     const refundResult = await prisma.$transaction(async (tx) => {
+      // 1. Mark payment as refunded
       const updatedPayment = await tx.payment.update({
         where: { id: paymentId },
         data: { status: "refunded" },
       });
 
+      // 2. Create double-entry Refund Transaction to Customer
       const refundTx = await tx.transaction.create({
         data: {
           paymentId: payment.id,
-          payerId: payment.booking.worker_profile.userId,
+          payerId: workerUserId,
           payeeId: customerUserId,
           amount: payment.amount,
           settledAt: new Date(),
@@ -348,6 +387,18 @@ export const refundEscrowPayment = async (
       return { updatedPayment, refundTx };
     });
 
+    // Notify Customer of refunded escrow
+    const notification = await prisma.notification.create({
+      data: {
+        userId: customerUserId,
+        title: `₹${payment.amount} Escrow Refunded 🔄`,
+        message: `Escrow funds refunded back to your wallet for "${payment.booking.service_request.title || "Task"}".`,
+        type: "escrow_refunded",
+        data: { bookingId: payment.booking.id, amount: payment.amount },
+      },
+    });
+    emitNotificationToUser(customerUserId, notification);
+
     res.status(200).json({
       success: true,
       message: "Escrow funds refunded back to customer successfully.",
@@ -356,6 +407,162 @@ export const refundEscrowPayment = async (
   } catch (error) {
     next(error);
   }
+};
+
+/**
+ * Helper to compute Normalized Double-Entry Transactions and Balances
+ */
+const buildUserLedger = (userId: string, payments: any[]) => {
+  const transactions: NormalizedLedgerTransaction[] = [];
+  let totalCredits = 0;
+  let totalDebits = 0;
+  let escrowHold = 0;
+  let totalLifetimeEarnings = 0;
+
+  for (const p of payments) {
+    const customerUserId = p.booking?.service_request?.customer_profile?.userId;
+    const workerUserId = p.booking?.worker_profile?.userId;
+    const isCustomer = customerUserId === userId;
+    const isWorker = workerUserId === userId;
+    const taskTitle = p.booking?.service_request?.title || "Hyperlocal Micro-Task";
+    const paymentStatus = (p.status || "").toLowerCase();
+
+    const payerObj = {
+      id: customerUserId,
+      name: p.booking?.service_request?.customer_profile?.user?.name || "Customer",
+      phone: p.booking?.service_request?.customer_profile?.user?.phone,
+    };
+
+    const payeeObj = {
+      id: workerUserId,
+      name: p.booking?.worker_profile?.user?.name || "Tasker",
+      phone: p.booking?.worker_profile?.user?.phone,
+    };
+
+    if (isCustomer) {
+      if (paymentStatus === "hold") {
+        // Escrow Hold: Money locked from Poster available balance into Escrow
+        escrowHold += p.amount;
+        transactions.push({
+          id: `escrow-${p.id}`,
+          paymentId: p.id,
+          type: "ESCROW_HOLD",
+          amount: p.amount,
+          rawAmount: -p.amount,
+          status: "ESCROW_HOLD",
+          description: `Escrow Payment locked for Task: ${taskTitle}`,
+          method: p.method || "RAZORPAY_UPI",
+          settledAt: p.createdAt,
+          taskTitle,
+          role: "poster",
+          payer: payerObj,
+          payee: payeeObj,
+          payment: p,
+        });
+      } else if (paymentStatus === "released") {
+        // Escrow Released: Money deducted/settled from Poster to Tasker
+        totalDebits += p.amount;
+        transactions.push({
+          id: `debit-${p.id}`,
+          paymentId: p.id,
+          type: "DEBIT",
+          amount: p.amount,
+          rawAmount: -p.amount,
+          status: "ESCROW_RELEASED",
+          description: `Escrow Payment settled for Task: ${taskTitle}`,
+          method: p.method || "RAZORPAY_UPI",
+          settledAt: p.transaction?.[0]?.settledAt || p.createdAt,
+          taskTitle,
+          role: "poster",
+          payer: payerObj,
+          payee: payeeObj,
+          payment: p,
+        });
+      } else if (paymentStatus === "refunded") {
+        // Refund: Returned back to Poster Available Balance
+        totalCredits += p.amount;
+        transactions.push({
+          id: `refund-${p.id}`,
+          paymentId: p.id,
+          type: "CREDIT",
+          amount: p.amount,
+          rawAmount: p.amount,
+          status: "REFUNDED",
+          description: `Escrow Refund for Cancelled Task: ${taskTitle}`,
+          method: p.method || "RAZORPAY_UPI",
+          settledAt: p.transaction?.[0]?.settledAt || p.createdAt,
+          taskTitle,
+          role: "poster",
+          payer: payerObj,
+          payee: payeeObj,
+          payment: p,
+        });
+      }
+    }
+
+    if (isWorker) {
+      const workerPayout =
+        p.transaction?.find((t: any) => t.payeeId === userId)?.amount ||
+        Number((p.amount * (1 - PLATFORM_FEE_PERCENT / 100)).toFixed(2));
+
+      if (paymentStatus === "released") {
+        // Worker Earnings: Credit to Worker
+        totalCredits += workerPayout;
+        totalLifetimeEarnings += workerPayout;
+
+        transactions.push({
+          id: `credit-${p.id}`,
+          paymentId: p.id,
+          type: "CREDIT",
+          amount: workerPayout,
+          rawAmount: workerPayout,
+          status: "SUCCESS",
+          description: `Payment received for Task: ${taskTitle}`,
+          method: p.method || "ESCROW_RELEASE",
+          settledAt: p.transaction?.[0]?.settledAt || p.createdAt,
+          taskTitle,
+          role: "tasker",
+          payer: payerObj,
+          payee: payeeObj,
+          payment: p,
+        });
+      } else if (paymentStatus === "hold") {
+        // Pending incoming Escrow for Worker (Does not increase available balance until OTP release)
+        transactions.push({
+          id: `pending-${p.id}`,
+          paymentId: p.id,
+          type: "ESCROW_HOLD",
+          amount: workerPayout,
+          rawAmount: workerPayout,
+          status: "PENDING",
+          description: `Incoming Escrow locked for Task: ${taskTitle}`,
+          method: p.method || "ESCROW_LOCKED",
+          settledAt: p.createdAt,
+          taskTitle,
+          role: "tasker",
+          payer: payerObj,
+          payee: payeeObj,
+          payment: p,
+        });
+      }
+    }
+  }
+
+  // Dynamic double-entry formula:
+  // Available Balance = Initial Base + Total Credits - Total Debits - Escrow Hold
+  const availableBalance = Math.max(0, INITIAL_SANDBOX_BALANCE + totalCredits - totalDebits - escrowHold);
+
+  return {
+    wallet: {
+      availableBalance: Number(availableBalance.toFixed(2)),
+      escrowHold: Number(escrowHold.toFixed(2)),
+      totalLifetimeEarnings: Number(totalLifetimeEarnings.toFixed(2)),
+      totalCredits: Number(totalCredits.toFixed(2)),
+      totalDebits: Number(totalDebits.toFixed(2)),
+      transactionsCount: transactions.length,
+    },
+    transactions,
+  };
 };
 
 /**
@@ -372,61 +579,44 @@ export const getWalletLedger = async (
     const userId = req.user?.id;
     if (!userId) throw new ApiError(401, "Unauthorized");
 
-    const earnedTransactions = await prisma.transaction.findMany({
+    const payments = await prisma.payment.findMany({
       where: {
-        payeeId: userId,
-        payment: { status: "released" },
-      },
-    });
-
-    const totalLifetimeEarnings = earnedTransactions.reduce(
-      (sum, tx) => sum + (tx.amount || 0),
-      0
-    );
-
-    const activeHoldPayments = await prisma.payment.findMany({
-      where: {
-        status: "hold",
-        booking: {
-          OR: [
-            { service_request: { customer_profile: { userId } } },
-            { worker_profile: { userId } },
-          ],
-        },
-      },
-    });
-
-    const escrowHold = activeHoldPayments.reduce((sum, p) => sum + p.amount, 0);
-    const availableBalance = Math.max(0, totalLifetimeEarnings + 1000);
-
-    const recentTransactions = await prisma.transaction.findMany({
-      where: {
-        OR: [{ payerId: userId }, { payeeId: userId }],
+        OR: [
+          { booking: { service_request: { customer_profile: { userId } } } },
+          { booking: { worker_profile: { userId } } },
+        ],
       },
       include: {
-        payer: { select: { id: true, name: true } },
-        payee: { select: { id: true, name: true } },
-        payment: {
+        booking: {
           include: {
-            booking: {
-              include: { service_request: true },
+            service_request: {
+              include: {
+                customer_profile: {
+                  include: { user: { select: { id: true, name: true, phone: true } } },
+                },
+              },
+            },
+            worker_profile: {
+              include: { user: { select: { id: true, name: true, phone: true } } },
             },
           },
         },
+        transaction: {
+          include: {
+            payer: { select: { id: true, name: true, phone: true } },
+            payee: { select: { id: true, name: true, phone: true } },
+          },
+        },
       },
-      orderBy: { settledAt: "desc" },
-      take: 20,
+      orderBy: { createdAt: "desc" },
     });
+
+    const ledgerData = buildUserLedger(userId, payments);
 
     res.status(200).json({
       success: true,
-      wallet: {
-        availableBalance,
-        escrowHold,
-        totalLifetimeEarnings,
-        transactionsCount: recentTransactions.length,
-      },
-      transactions: recentTransactions,
+      wallet: ledgerData.wallet,
+      transactions: ledgerData.transactions,
     });
   } catch (error) {
     next(error);
@@ -447,28 +637,44 @@ export const getMyTransactions = async (
     const userId = req.user?.id;
     if (!userId) throw new ApiError(401, "Unauthorized");
 
-    const transactions = await prisma.transaction.findMany({
+    const payments = await prisma.payment.findMany({
       where: {
-        OR: [{ payerId: userId }, { payeeId: userId }],
+        OR: [
+          { booking: { service_request: { customer_profile: { userId } } } },
+          { booking: { worker_profile: { userId } } },
+        ],
       },
       include: {
-        payer: { select: { id: true, name: true, phone: true } },
-        payee: { select: { id: true, name: true, phone: true } },
-        payment: {
+        booking: {
           include: {
-            booking: {
-              include: { service_request: true },
+            service_request: {
+              include: {
+                customer_profile: {
+                  include: { user: { select: { id: true, name: true, phone: true } } },
+                },
+              },
+            },
+            worker_profile: {
+              include: { user: { select: { id: true, name: true, phone: true } } },
             },
           },
         },
+        transaction: {
+          include: {
+            payer: { select: { id: true, name: true, phone: true } },
+            payee: { select: { id: true, name: true, phone: true } },
+          },
+        },
       },
-      orderBy: { settledAt: "desc" },
+      orderBy: { createdAt: "desc" },
     });
+
+    const ledgerData = buildUserLedger(userId, payments);
 
     res.status(200).json({
       success: true,
-      count: transactions.length,
-      transactions,
+      count: ledgerData.transactions.length,
+      transactions: ledgerData.transactions,
     });
   } catch (error) {
     next(error);

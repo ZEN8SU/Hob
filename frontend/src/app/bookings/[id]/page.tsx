@@ -31,8 +31,8 @@ export default function BookingDetailPage() {
   const params = useParams();
   const router = useRouter();
   const bookingId = params?.id as string;
-  const { user, token, mode } = useAppStore();
-  const isWorker = mode === "worker";
+  // Strictly avoid binding component logic to global UI mode toggle
+  const { user, token } = useAppStore();
 
   const [booking, setBooking] = useState<any>(null);
   const [status, setStatus] = useState<BookingStatus>("pending");
@@ -42,15 +42,23 @@ export default function BookingDetailPage() {
   const [payingEscrow, setPayingEscrow] = useState(false);
 
   // Chat State
-  const [messages, setMessages] = useState<Array<{ id?: string; senderId?: string; senderName?: string; text: string; time: string; isMe: boolean }>>([]);
+  const [messages, setMessages] = useState<
+    Array<{ id?: string; senderId?: string; senderName?: string; text: string; time: string; isMe: boolean }>
+  >([]);
   const [chatInput, setChatInput] = useState("");
   const socketRef = useRef<Socket | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   // Review Modal State
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [rating, setRating] = useState(5);
   const [reviewComment, setReviewComment] = useState("");
   const [submittingReview, setSubmittingReview] = useState(false);
+
+  // Auto-scroll chat messages to bottom
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
   // Fetch Booking Details from DB
   const fetchBooking = async () => {
@@ -88,41 +96,66 @@ export default function BookingDetailPage() {
     }
   }, [bookingId, token]);
 
-  // Socket.io Real-time Chat Connection
+  // Socket.io Real-time Chat Connection - Stable and immune to global Navbar role toggles
   useEffect(() => {
     if (!token || !bookingId) return;
 
     const socket = io(SOCKET_URL, {
       auth: { token },
+      transports: ["websocket", "polling"],
     });
 
     socketRef.current = socket;
 
-    socket.on("connect", () => {
+    const handleConnect = () => {
       socket.emit("join_booking", bookingId);
-    });
+      socket.emit("join_room", bookingId);
+    };
 
-    socket.on("booking_joined", (data: any) => {
-      setIsChatLocked(data.isLocked);
-    });
+    const handleBookingJoined = (data: any) => {
+      if (data && typeof data.isLocked === "boolean") {
+        setIsChatLocked(data.isLocked);
+      }
+    };
 
-    socket.on("new_message", (msg: any) => {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: msg.id,
-          senderId: msg.senderId,
-          senderName: msg.sender?.name || "User",
-          text: msg.message,
-          time: new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-          isMe: msg.senderId === user?.id,
-        },
-      ]);
-    });
+    const handleNewMessage = (msg: any) => {
+      setMessages((prev) => {
+        if (msg.id && prev.some((m) => m.id === msg.id)) {
+          return prev;
+        }
+        return [
+          ...prev,
+          {
+            id: msg.id,
+            senderId: msg.senderId,
+            senderName: msg.sender?.name || "User",
+            text: msg.message,
+            time: new Date(msg.createdAt || Date.now()).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            }),
+            isMe: msg.senderId === user?.id,
+          },
+        ];
+      });
+    };
+
+    socket.on("connect", handleConnect);
+    socket.on("booking_joined", handleBookingJoined);
+    socket.on("new_message", handleNewMessage);
+
+    if (socket.connected) {
+      handleConnect();
+    }
 
     return () => {
+      socket.off("connect", handleConnect);
+      socket.off("booking_joined", handleBookingJoined);
+      socket.off("new_message", handleNewMessage);
       socket.emit("leave_booking", bookingId);
+      socket.emit("leave_room", bookingId);
       socket.disconnect();
+      socketRef.current = null;
     };
   }, [bookingId, token, user?.id]);
 
@@ -147,18 +180,18 @@ export default function BookingDetailPage() {
       // 1. Create Razorpay Order
       const orderRes = await paymentApi.createRazorpayOrder({
         bookingId,
-        amount: booking.service_request?.budget || 400,
+        amount: booking?.service_request?.budget || 400,
       });
 
       const order = orderRes.data.order;
 
       // 2. Mock / Real Razorpay Verification
-      const verifyRes = await paymentApi.verifyRazorpayPayment({
+      await paymentApi.verifyRazorpayPayment({
         bookingId,
         razorpayOrderId: order.id,
         razorpayPaymentId: `pay_${Date.now()}`,
         razorpaySignature: "mock_signature_approved",
-        amount: orderRes.data.breakdown.totalAmount,
+        amount: orderRes.data.breakdown?.totalAmount || booking?.service_request?.budget || 400,
       });
 
       alert("Escrow Payment Secured! Funds locked in Escrow. Chat is now unlocked.");
@@ -181,7 +214,7 @@ export default function BookingDetailPage() {
     }
   };
 
-  // Tasker or Poster Completes Task with 4-Digit Handshake OTP
+  // Tasker Completes Task with 4-Digit Handshake OTP
   const handleCompleteTask = async () => {
     if (!otpInput || otpInput.trim().length !== 4) {
       alert("Please enter the 4-digit Handshake OTP provided by the Customer.");
@@ -233,10 +266,29 @@ export default function BookingDetailPage() {
     );
   }
 
+  // Determine user role strictly from booking object context (NOT global Navbar state)
+  const customerUserId =
+    booking?.service_request?.customer_profile?.userId ||
+    booking?.service_request?.customerId ||
+    booking?.customerId;
+
+  const workerUserId =
+    booking?.worker_profile?.userId ||
+    booking?.workerId;
+
+  const isCustomer = Boolean(user?.id && customerUserId === user.id);
+  const isWorker = Boolean(user?.id && workerUserId === user.id);
+
   const taskTitle = booking?.service_request?.title || "Hyperlocal Task Booking";
   const budgetAmount = booking?.service_request?.budget || 400;
   const handshakeCode = booking?.handshakeOtp || booking?.otpCode || "4829";
-  const isCustomer = booking?.service_request?.customer_profile?.userId === user?.id;
+
+  // Partner display name and avatar initial
+  const partnerName = isWorker
+    ? booking?.service_request?.customer_profile?.user?.name || "Customer"
+    : booking?.worker_profile?.user?.name || "Tasker";
+
+  const partnerInitial = partnerName.charAt(0).toUpperCase() || (isWorker ? "C" : "T");
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8 space-y-8">
@@ -250,6 +302,9 @@ export default function BookingDetailPage() {
             <Badge variant="honey" size="sm">
               ID: {bookingId ? bookingId.slice(0, 8) : "BK-7890"}
             </Badge>
+            <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full bg-zinc-900 text-yellow-400">
+              {isCustomer ? "Viewing as Customer" : isWorker ? "Viewing as Tasker" : "Job Room"}
+            </span>
           </div>
           <h1 className="text-2xl sm:text-3xl font-black text-zinc-950">{taskTitle}</h1>
         </div>
@@ -403,17 +458,15 @@ export default function BookingDetailPage() {
           <div className="p-4 bg-zinc-900 text-white border-b border-zinc-800 flex items-center justify-between">
             <div className="flex items-center gap-2.5">
               <div className="w-8 h-8 rounded-full bg-yellow-400 text-zinc-950 font-black text-xs flex items-center justify-center">
-                {isWorker ? "C" : "W"}
+                {partnerInitial}
               </div>
               <div>
                 <h4 className="text-xs font-bold text-white">
-                  {isWorker
-                    ? booking?.service_request?.customer_profile?.user?.name || "Customer"
-                    : booking?.worker_profile?.user?.name || "Tasker"}
+                  {partnerName}
                 </h4>
                 <div className="flex items-center gap-1 text-[10px] text-yellow-400">
                   <Star className="w-3 h-3 fill-yellow-400" />
-                  <span>5.0 Verified Peer</span>
+                  <span>5.0 Verified Peer ({isCustomer ? "Tasker" : "Customer"})</span>
                 </div>
               </div>
             </div>
@@ -469,6 +522,7 @@ export default function BookingDetailPage() {
                     </div>
                   ))
                 )}
+                <div ref={messagesEndRef} />
               </div>
 
               {/* Chat Input */}

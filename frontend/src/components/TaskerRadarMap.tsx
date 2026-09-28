@@ -10,6 +10,36 @@ import { TaskItem } from "./TaskCard";
 const MAPBOX_TOKEN =
   process.env.NEXT_PUBLIC_MAPBOX_TOKEN?.trim() || "";
 
+// Fallback default placeholder and Open Carto Dark style for when Mapbox token is not configured
+const PUBLIC_FALLBACK_TOKEN = "pk.placeholder";
+
+const CARTO_DARK_STYLE: any = {
+  version: 8,
+  sources: {
+    "carto-dark": {
+      type: "raster",
+      tiles: [
+        "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
+        "https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
+        "https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
+        "https://d.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
+      ],
+      tileSize: 256,
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    },
+  },
+  layers: [
+    {
+      id: "carto-dark-layer",
+      type: "raster",
+      source: "carto-dark",
+      minzoom: 0,
+      maxzoom: 22,
+    },
+  ],
+};
+
 // Fallback Default Coordinates: Delhi, India
 const DEFAULT_LAT = 28.6139;
 const DEFAULT_LNG = 77.209;
@@ -34,26 +64,26 @@ export const TaskerRadarMap: React.FC<TaskerRadarMapProps> = ({
   const userMarkerRef = useRef<mapboxgl.Marker | null>(null);
 
   const [mapLoaded, setMapLoaded] = useState(false);
-  const [tokenError, setTokenError] = useState(false);
+  const [isFallbackMode, setIsFallbackMode] = useState(false);
 
   const centerLat = userLocation?.latitude ?? DEFAULT_LAT;
   const centerLng = userLocation?.longitude ?? DEFAULT_LNG;
 
   useEffect(() => {
-    if (!MAPBOX_TOKEN) {
-      setTokenError(true);
-      return;
-    }
-
     if (!mapContainerRef.current) return;
 
-    // Set Mapbox Token
-    mapboxgl.accessToken = MAPBOX_TOKEN;
+    const hasCustomToken = Boolean(MAPBOX_TOKEN);
+    mapboxgl.accessToken = hasCustomToken ? MAPBOX_TOKEN : PUBLIC_FALLBACK_TOKEN;
+    const initialStyle = hasCustomToken
+      ? "mapbox://styles/mapbox/navigation-night-v1"
+      : CARTO_DARK_STYLE;
+
+    setIsFallbackMode(!hasCustomToken);
 
     // Initialize Mapbox Map
     const map = new mapboxgl.Map({
       container: mapContainerRef.current,
-      style: "mapbox://styles/mapbox/navigation-night-v1",
+      style: initialStyle,
       center: [centerLng, centerLat],
       zoom: DEFAULT_ZOOM,
       attributionControl: false,
@@ -70,8 +100,17 @@ export const TaskerRadarMap: React.FC<TaskerRadarMapProps> = ({
 
     map.on("error", (e) => {
       console.warn("Mapbox GL event error:", e);
-      if (e.error?.message?.includes("forbidden") || e.error?.message?.includes("unauthorized")) {
-        setTokenError(true);
+      if (
+        e.error?.message?.includes("forbidden") ||
+        e.error?.message?.includes("unauthorized")
+      ) {
+        // Switch to open Carto Dark fallback if custom token fails
+        try {
+          map.setStyle(CARTO_DARK_STYLE);
+          setIsFallbackMode(true);
+        } catch (err) {
+          console.error("Failed to switch to fallback style:", err);
+        }
       }
     });
 
@@ -198,23 +237,6 @@ export const TaskerRadarMap: React.FC<TaskerRadarMapProps> = ({
     });
   };
 
-  if (tokenError) {
-    return (
-      <div className="w-full h-[500px] rounded-2xl overflow-hidden relative border-2 border-yellow-400/30 bg-zinc-950 shadow-2xl flex flex-col items-center justify-center p-6 text-center">
-        <div className="w-12 h-12 rounded-2xl bg-yellow-400/20 text-yellow-400 flex items-center justify-center mb-3">
-          <AlertCircle className="w-6 h-6" />
-        </div>
-        <h3 className="text-base font-black text-white">Mapbox Access Token Missing</h3>
-        <p className="text-xs text-zinc-400 max-w-md mt-1 mb-4">
-          Please define `NEXT_PUBLIC_MAPBOX_TOKEN` in your environment settings to render the interactive Mapbox GL JS radar view.
-        </p>
-        <span className="text-[11px] font-mono bg-zinc-900 text-yellow-400 border border-yellow-400/30 px-3 py-1.5 rounded-xl">
-          process.env.NEXT_PUBLIC_MAPBOX_TOKEN
-        </span>
-      </div>
-    );
-  }
-
   return (
     <div className="w-full h-[500px] rounded-2xl overflow-hidden relative border-2 border-yellow-400/30 bg-zinc-950 shadow-2xl">
       {/* Mapbox Canvas Container (Explicit fixed height prevents 0px bug) */}
@@ -225,7 +247,7 @@ export const TaskerRadarMap: React.FC<TaskerRadarMapProps> = ({
         <div className="absolute inset-0 bg-zinc-950/80 backdrop-blur-sm flex flex-col items-center justify-center gap-2 z-30">
           <Loader2 className="w-8 h-8 text-yellow-400 animate-spin" />
           <span className="text-xs font-bold text-yellow-400">
-            Initializing Mapbox GL JS Radar Engine...
+            Initializing Radar Engine...
           </span>
         </div>
       )}
@@ -248,6 +270,13 @@ export const TaskerRadarMap: React.FC<TaskerRadarMapProps> = ({
         <Navigation className="w-3.5 h-3.5" />
         <span className="hidden sm:inline">Center On Me</span>
       </button>
+
+      {/* Fallback Tile Notice (if no custom Mapbox token is set) */}
+      {isFallbackMode && (
+        <div className="absolute top-4 right-14 z-20 hidden md:flex items-center gap-1.5 bg-zinc-950/80 backdrop-blur-sm border border-zinc-800 text-[10px] text-zinc-400 px-2.5 py-1 rounded-full">
+          <span>Dark Tile Mode (Open Carto)</span>
+        </div>
+      )}
     </div>
   );
 };

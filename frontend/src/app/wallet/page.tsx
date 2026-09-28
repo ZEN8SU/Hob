@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -16,6 +16,8 @@ import {
   CheckCircle2,
   X,
   Loader2,
+  Filter,
+  Check,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
@@ -23,23 +25,45 @@ import { Input } from "@/components/ui/Input";
 import { useAppStore } from "@/lib/store";
 import { paymentApi } from "@/lib/api";
 
+export interface TransactionItem {
+  id: string;
+  paymentId?: string;
+  type: "CREDIT" | "DEBIT" | "ESCROW_HOLD" | "ESCROW_RELEASE";
+  amount: number;
+  rawAmount?: number;
+  status: string;
+  description: string;
+  method?: string;
+  settledAt: string;
+  taskTitle?: string;
+  role?: "poster" | "tasker";
+  payer?: { id?: string; name?: string };
+  payee?: { id?: string; name?: string };
+  payment?: any;
+}
+
 export default function WalletPage() {
   const router = useRouter();
-  const { token, updateWallet } = useAppStore();
+  const { token, updateWallet, user } = useAppStore();
 
   const [loading, setLoading] = useState(true);
   const [walletStats, setWalletStats] = useState({
-    availableBalance: 2450.0,
-    escrowHold: 450.0,
-    totalLifetimeEarnings: 8940.0,
+    availableBalance: 5000.0,
+    escrowHold: 0.0,
+    totalLifetimeEarnings: 0.0,
+    totalCredits: 0.0,
+    totalDebits: 0.0,
   });
 
+  const [transactions, setTransactions] = useState<TransactionItem[]>([]);
+  const [filterType, setFilterType] = useState<"ALL" | "CREDIT" | "DEBIT" | "ESCROW_HOLD">("ALL");
+
+  // Modals
   const [showDepositModal, setShowDepositModal] = useState(false);
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
   const [depositAmount, setDepositAmount] = useState("1000");
   const [withdrawAmount, setWithdrawAmount] = useState("500");
   const [upiId, setUpiId] = useState("user@okaxis");
-  const [transactions, setTransactions] = useState<any[]>([]);
 
   const fetchWallet = async () => {
     try {
@@ -74,53 +98,77 @@ export default function WalletPage() {
     fetchWallet();
   }, [token]);
 
+  // Filtered transactions based on selected filter tab
+  const filteredTransactions = useMemo(() => {
+    if (filterType === "ALL") return transactions;
+    return transactions.filter((tx) => tx.type === filterType);
+  }, [transactions, filterType]);
+
+  // Handle Instant UPI Top-up (CREDIT)
   const handleDeposit = () => {
     const amt = Number(depositAmount);
     if (amt > 0) {
-      setWalletStats((prev) => ({
-        ...prev,
-        availableBalance: prev.availableBalance + amt,
-      }));
-      setTransactions((prev) => [
-        {
-          id: `tx-${Date.now()}`,
-          amount: amt,
-          settledAt: new Date().toISOString(),
-          payment: {
-            method: "UPI (GooglePay)",
-            status: "released",
-            booking: { service_request: { title: `Instant UPI Top-up (${upiId})` } },
-          },
-        },
-        ...prev,
-      ]);
+      const newTx: TransactionItem = {
+        id: `tx-dep-${Date.now()}`,
+        type: "CREDIT",
+        amount: amt,
+        rawAmount: amt,
+        status: "SUCCESS",
+        description: `Instant UPI Top-up (${upiId})`,
+        method: "UPI (GooglePay / PhonePe)",
+        settledAt: new Date().toISOString(),
+        role: "poster",
+      };
+
+      const updatedTransactions = [newTx, ...transactions];
+      setTransactions(updatedTransactions);
+
+      const newAvailable = walletStats.availableBalance + amt;
+      const newCredits = walletStats.totalCredits + amt;
+      const newStats = {
+        ...walletStats,
+        availableBalance: newAvailable,
+        totalCredits: newCredits,
+      };
+      setWalletStats(newStats);
+      updateWallet(newAvailable, walletStats.escrowHold, walletStats.totalLifetimeEarnings);
+
       setShowDepositModal(false);
     }
   };
 
+  // Handle Withdrawal to Bank (DEBIT)
   const handleWithdraw = () => {
     const amt = Number(withdrawAmount);
     if (amt > 0 && amt <= walletStats.availableBalance) {
-      setWalletStats((prev) => ({
-        ...prev,
-        availableBalance: prev.availableBalance - amt,
-      }));
-      setTransactions((prev) => [
-        {
-          id: `tx-${Date.now()}`,
-          amount: amt,
-          settledAt: new Date().toISOString(),
-          payment: {
-            method: "IMPS Payout",
-            status: "withdrawn",
-            booking: { service_request: { title: `Direct UPI Withdrawal (${upiId})` } },
-          },
-        },
-        ...prev,
-      ]);
+      const newTx: TransactionItem = {
+        id: `tx-wth-${Date.now()}`,
+        type: "DEBIT",
+        amount: amt,
+        rawAmount: -amt,
+        status: "SUCCESS",
+        description: `Direct Bank/UPI Payout (${upiId})`,
+        method: "IMPS Instant Transfer",
+        settledAt: new Date().toISOString(),
+        role: "tasker",
+      };
+
+      const updatedTransactions = [newTx, ...transactions];
+      setTransactions(updatedTransactions);
+
+      const newAvailable = walletStats.availableBalance - amt;
+      const newDebits = walletStats.totalDebits + amt;
+      const newStats = {
+        ...walletStats,
+        availableBalance: newAvailable,
+        totalDebits: newDebits,
+      };
+      setWalletStats(newStats);
+      updateWallet(newAvailable, walletStats.escrowHold, walletStats.totalLifetimeEarnings);
+
       setShowWithdrawModal(false);
     } else {
-      alert("Insufficient available balance.");
+      alert("Insufficient available balance for withdrawal.");
     }
   };
 
@@ -129,9 +177,14 @@ export default function WalletPage() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <span className="text-xs font-black uppercase text-yellow-600 tracking-wider">
-            Escrow Financial Ledger
-          </span>
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-xs font-black uppercase text-yellow-600 tracking-wider">
+              Escrow Financial Ledger
+            </span>
+            <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full bg-zinc-900 text-yellow-400">
+              Double-Entry Accounting
+            </span>
+          </div>
           <h1 className="text-2xl sm:text-3xl font-black text-zinc-950">
             Wallet & Escrow Holdings
           </h1>
@@ -162,7 +215,7 @@ export default function WalletPage() {
 
       {/* 3-Pillar Financial Bento Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-        {/* Available Balance */}
+        {/* 1. Available Balance Card */}
         <div className="rounded-3xl bg-zinc-900 text-white p-6 border-2 border-yellow-400/40 shadow-xl relative overflow-hidden flex flex-col justify-between">
           <div className="flex items-center justify-between mb-4">
             <span className="text-xs font-bold text-zinc-400 uppercase tracking-wider">
@@ -178,12 +231,12 @@ export default function WalletPage() {
               <span>{walletStats.availableBalance.toFixed(2)}</span>
             </div>
             <p className="text-[11px] text-zinc-400 mt-1">
-              Ready for instant UPI withdrawal or new task posting.
+              Net balance available for immediate task posting or bank withdrawal.
             </p>
           </div>
         </div>
 
-        {/* Escrow Locked */}
+        {/* 2. Escrow Locked Card */}
         <div className="rounded-3xl bg-white border border-zinc-200 p-6 shadow-sm flex flex-col justify-between">
           <div className="flex items-center justify-between mb-4">
             <span className="text-xs font-bold text-zinc-500 uppercase tracking-wider">
@@ -195,16 +248,16 @@ export default function WalletPage() {
           </div>
           <div>
             <div className="text-3xl sm:text-4xl font-black text-zinc-900 tracking-tight flex items-baseline gap-1">
-              <span className="text-yellow-500">₹</span>
+              <span className="text-amber-500">₹</span>
               <span>{walletStats.escrowHold.toFixed(2)}</span>
             </div>
             <p className="text-[11px] text-zinc-500 mt-1">
-              Held safely for in-progress bookings. Releases upon completion OTP.
+              Funds securely held in platform Escrow. Unlocks upon Handshake OTP release.
             </p>
           </div>
         </div>
 
-        {/* Lifetime Earnings */}
+        {/* 3. Lifetime Earnings Card */}
         <div className="rounded-3xl bg-white border border-zinc-200 p-6 shadow-sm flex flex-col justify-between">
           <div className="flex items-center justify-between mb-4">
             <span className="text-xs font-bold text-zinc-500 uppercase tracking-wider">
@@ -220,13 +273,13 @@ export default function WalletPage() {
               <span>{walletStats.totalLifetimeEarnings.toFixed(2)}</span>
             </div>
             <p className="text-[11px] text-zinc-500 mt-1">
-              Total 85% payouts settled across completed micro-tasks.
+              Total 85% payouts credited across successfully completed micro-tasks.
             </p>
           </div>
         </div>
       </div>
 
-      {/* Escrow Mechanism Info Banner */}
+      {/* Escrow Guarantee Banner */}
       <div className="rounded-3xl bg-yellow-50 border border-yellow-300/80 p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <ShieldCheck className="w-8 h-8 text-yellow-700 shrink-0" />
@@ -235,7 +288,7 @@ export default function WalletPage() {
               Double-Sided Escrow Guarantee
             </h4>
             <p className="text-yellow-800 mt-0.5 max-w-2xl">
-              When a booking is confirmed, customer funds are locked in Escrow. When the worker finishes and customer verifies OTP, 85% is instantly credited to Worker Wallet and 15% platform fee is deducted.
+              When a booking is confirmed, poster funds are locked in Escrow. When the worker finishes and poster verifies OTP, 85% is instantly credited to Worker Wallet and 15% platform fee is settled.
             </p>
           </div>
         </div>
@@ -245,17 +298,41 @@ export default function WalletPage() {
       </div>
 
       {/* Transaction History Ledger */}
-      <div className="bg-white rounded-3xl border border-zinc-200 shadow-sm p-6 space-y-4">
-        <div className="flex items-center justify-between border-b border-zinc-100 pb-3">
+      <div className="bg-white rounded-3xl border border-zinc-200 shadow-sm p-6 space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-zinc-100 pb-4">
           <div className="flex items-center gap-2">
             <History className="w-4 h-4 text-yellow-600" />
             <h3 className="text-sm font-black text-zinc-900 uppercase tracking-wider">
               Ledger Transactions
             </h3>
+            <span className="text-xs text-zinc-400 ml-2">
+              ({filteredTransactions.length} of {transactions.length} Records)
+            </span>
           </div>
-          <span className="text-xs text-zinc-400">
-            {transactions.length} Recorded Ledger Events
-          </span>
+
+          {/* Filter Pills */}
+          <div className="flex items-center gap-1.5 bg-zinc-100 p-1 rounded-2xl">
+            {(
+              [
+                { label: "All", value: "ALL" },
+                { label: "Credits (+)", value: "CREDIT" },
+                { label: "Debits (-)", value: "DEBIT" },
+                { label: "Escrow (🔒)", value: "ESCROW_HOLD" },
+              ] as const
+            ).map((tab) => (
+              <button
+                key={tab.value}
+                onClick={() => setFilterType(tab.value)}
+                className={`px-3 py-1 text-xs font-bold rounded-xl transition ${
+                  filterType === tab.value
+                    ? "bg-zinc-900 text-yellow-400 shadow-sm"
+                    : "text-zinc-600 hover:text-zinc-950"
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
         </div>
 
         {loading ? (
@@ -263,64 +340,101 @@ export default function WalletPage() {
             <Loader2 className="w-6 h-6 text-yellow-500 animate-spin mx-auto mb-2" />
             <p className="text-xs text-zinc-500">Loading ledger transactions...</p>
           </div>
-        ) : transactions.length > 0 ? (
+        ) : filteredTransactions.length > 0 ? (
           <div className="divide-y divide-zinc-100">
-            {transactions.map((tx) => {
-              const title = tx.payment?.booking?.service_request?.title || "Escrow Settlement";
-              const isHold = tx.payment?.status === "hold";
-              const isWithdrawn = tx.payment?.status === "withdrawn";
+            {filteredTransactions.map((tx) => {
+              const isCredit = tx.type === "CREDIT";
+              const isDebit = tx.type === "DEBIT";
+              const isEscrowHold = tx.type === "ESCROW_HOLD";
+              const isEscrowRelease = tx.type === "ESCROW_RELEASE";
+
+              const title =
+                tx.taskTitle ||
+                tx.description ||
+                tx.payment?.booking?.service_request?.title ||
+                "Escrow Settlement";
 
               return (
-                <div key={tx.id} className="py-3.5 flex items-center justify-between gap-4">
+                <div key={tx.id} className="py-4 flex items-center justify-between gap-4">
                   <div className="flex items-center gap-3.5">
+                    {/* Icon Indicator */}
                     <div
-                      className={`w-10 h-10 rounded-2xl flex items-center justify-center font-bold shrink-0 ${
-                        isHold
-                          ? "bg-yellow-100 text-yellow-800"
-                          : isWithdrawn
-                          ? "bg-rose-100 text-rose-800"
-                          : "bg-emerald-100 text-emerald-800"
+                      className={`w-10 h-10 rounded-2xl flex items-center justify-center font-bold shrink-0 border ${
+                        isCredit
+                          ? "bg-emerald-100 text-emerald-800 border-emerald-200"
+                          : isDebit
+                          ? "bg-rose-100 text-rose-800 border-rose-200"
+                          : isEscrowHold
+                          ? "bg-amber-100 text-amber-800 border-amber-300"
+                          : "bg-blue-100 text-blue-800 border-blue-200"
                       }`}
                     >
-                      {isHold ? (
-                        <Lock className="w-5 h-5" />
-                      ) : isWithdrawn ? (
-                        <ArrowUpRight className="w-5 h-5" />
-                      ) : (
+                      {isCredit ? (
                         <ArrowDownLeft className="w-5 h-5" />
+                      ) : isDebit ? (
+                        <ArrowUpRight className="w-5 h-5" />
+                      ) : isEscrowHold ? (
+                        <Lock className="w-5 h-5" />
+                      ) : (
+                        <ShieldCheck className="w-5 h-5" />
                       )}
                     </div>
 
                     <div>
                       <h4 className="text-xs font-bold text-zinc-900">{title}</h4>
-                      <p className="text-[11px] text-zinc-500">
-                        {tx.payment?.method || "UPI Ledger"}
+                      <p className="text-[11px] text-zinc-500 mt-0.5">
+                        {tx.description || tx.method || "Payment Gateway"}
                       </p>
-                      <span className="text-[10px] text-zinc-400">
-                        {new Date(tx.settledAt).toLocaleString("en-IN")}
+                      <span className="text-[10px] text-zinc-400 block mt-0.5">
+                        {new Date(tx.settledAt).toLocaleString("en-IN", {
+                          dateStyle: "medium",
+                          timeStyle: "short",
+                        })}
                       </span>
                     </div>
                   </div>
 
-                  <div className="text-right">
+                  {/* Amount & Status Badge */}
+                  <div className="text-right flex flex-col items-end">
                     <div
                       className={`text-sm font-black ${
-                        isHold
-                          ? "text-amber-600"
-                          : isWithdrawn
+                        isCredit
+                          ? "text-emerald-600"
+                          : isDebit
                           ? "text-rose-600"
-                          : "text-emerald-600"
+                          : isEscrowHold
+                          ? "text-amber-600"
+                          : "text-blue-600"
                       }`}
                     >
-                      {isWithdrawn ? "-" : "+"}₹{(tx.amount || 0).toFixed(2)}
+                      {isCredit
+                        ? `+₹${tx.amount.toFixed(2)}`
+                        : isDebit
+                        ? `-₹${tx.amount.toFixed(2)}`
+                        : isEscrowHold
+                        ? `🔒 -₹${tx.amount.toFixed(2)}`
+                        : `-₹${tx.amount.toFixed(2)}`}
                     </div>
-                    <Badge
-                      variant={isHold ? "warning" : "success"}
-                      size="sm"
-                      className="mt-0.5"
+
+                    <span
+                      className={`mt-1 text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-md ${
+                        isCredit
+                          ? "bg-emerald-100 text-emerald-800"
+                          : isDebit
+                          ? "bg-rose-100 text-rose-800"
+                          : isEscrowHold
+                          ? "bg-amber-100 text-amber-800"
+                          : "bg-blue-100 text-blue-800"
+                      }`}
                     >
-                      {tx.payment?.status || "settled"}
-                    </Badge>
+                      {isCredit
+                        ? "CREDIT"
+                        : isDebit
+                        ? "DEBIT"
+                        : isEscrowHold
+                        ? "ESCROW LOCKED"
+                        : "ESCROW SETTLED"}
+                    </span>
                   </div>
                 </div>
               );
@@ -328,7 +442,7 @@ export default function WalletPage() {
           </div>
         ) : (
           <div className="py-12 text-center text-xs text-zinc-400">
-            No transactions yet. Complete tasks to build your financial ledger.
+            No transactions match the selected filter.
           </div>
         )}
       </div>

@@ -19,6 +19,7 @@ import {
   Sparkles,
   LucideIcon,
   Check,
+  Lock,
 } from "lucide-react";
 import { useAppStore } from "@/lib/store";
 import { userApi } from "@/lib/api";
@@ -41,6 +42,9 @@ export const Navbar: React.FC = () => {
   const [notificationsList, setNotificationsList] = useState<any[]>([]);
 
   const isPoster = mode === "poster";
+  const isBookingOrChatRoom = Boolean(
+    pathname && (/^\/bookings\/.+/.test(pathname) || pathname.startsWith("/chat"))
+  );
 
   const posterNavLinks: NavItem[] = [
     { name: "Browse Feed", href: "/dashboard", icon: Search },
@@ -158,19 +162,29 @@ export const Navbar: React.FC = () => {
 
           {/* Right Action Bar: Dual-Mode Switcher, Wallet, Notifications & User Profile */}
           <div className="hidden lg:flex items-center gap-3">
-            {/* Dual Mode Switcher Button */}
-            <motion.button
-              whileTap={{ scale: 0.95 }}
-              onClick={toggleMode}
-              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-black border transition-all shadow-sm ${
-                isPoster
-                  ? "bg-zinc-900 text-yellow-400 border-yellow-400/40 hover:bg-zinc-800"
-                  : "bg-yellow-400 text-zinc-950 border-yellow-500 hover:bg-yellow-500"
-              }`}
-            >
-              <ArrowRightLeft className="w-3.5 h-3.5" />
-              <span>{isPoster ? "Poster Mode (Need Help)" : "Tasker Mode (Earn ₹)"}</span>
-            </motion.button>
+            {/* Dual Mode Switcher or Persistent Role-Locked Session Badge */}
+            {isBookingOrChatRoom ? (
+              <div
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-bold bg-amber-500/10 text-amber-800 border border-amber-400/40 shadow-sm select-none"
+                title="Role switching is locked inside an active booking session"
+              >
+                <Lock className="w-3.5 h-3.5 text-amber-600" />
+                <span>Active Job Session (Role Locked)</span>
+              </div>
+            ) : (
+              <motion.button
+                whileTap={{ scale: 0.95 }}
+                onClick={toggleMode}
+                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-black border transition-all shadow-sm ${
+                  isPoster
+                    ? "bg-zinc-900 text-yellow-400 border-yellow-400/40 hover:bg-zinc-800"
+                    : "bg-yellow-400 text-zinc-950 border-yellow-500 hover:bg-yellow-500"
+                }`}
+              >
+                <ArrowRightLeft className="w-3.5 h-3.5" />
+                <span>{isPoster ? "Poster Mode (Need Help)" : "Tasker Mode (Earn ₹)"}</span>
+              </motion.button>
+            )}
 
             {/* Wallet Balance Pill */}
             <Link href="/wallet">
@@ -282,15 +296,24 @@ export const Navbar: React.FC = () => {
 
           {/* Mobile Menu Button */}
           <div className="flex lg:hidden items-center gap-2">
-            <motion.button
-              whileTap={{ scale: 0.95 }}
-              onClick={toggleMode}
-              className={`p-2 rounded-xl text-xs font-bold ${
-                isPoster ? "bg-zinc-900 text-yellow-400" : "bg-yellow-400 text-zinc-950"
-              }`}
-            >
-              <ArrowRightLeft className="w-4 h-4" />
-            </motion.button>
+            {isBookingOrChatRoom ? (
+              <div
+                className="p-2 rounded-xl text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300"
+                title="Active Job Session (Role Locked)"
+              >
+                <Lock className="w-4 h-4 text-amber-700" />
+              </div>
+            ) : (
+              <motion.button
+                whileTap={{ scale: 0.95 }}
+                onClick={toggleMode}
+                className={`p-2 rounded-xl text-xs font-bold ${
+                  isPoster ? "bg-zinc-900 text-yellow-400" : "bg-yellow-400 text-zinc-950"
+                }`}
+              >
+                <ArrowRightLeft className="w-4 h-4" />
+              </motion.button>
+            )}
             <button
               onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
               className="p-2 rounded-xl text-zinc-700 hover:bg-zinc-100"
@@ -312,9 +335,15 @@ export const Navbar: React.FC = () => {
           >
             <div className="flex items-center justify-between p-3 rounded-xl bg-zinc-100">
               <span className="text-xs font-bold text-zinc-700">Current Role:</span>
-              <span className="text-xs font-black text-zinc-900 uppercase">
-                {isPoster ? "Task Poster (Customer)" : "Tasker (Worker)"}
-              </span>
+              {isBookingOrChatRoom ? (
+                <span className="text-xs font-black text-amber-700 flex items-center gap-1 uppercase">
+                  <Lock className="w-3.5 h-3.5" /> Session Locked
+                </span>
+              ) : (
+                <span className="text-xs font-black text-zinc-900 uppercase">
+                  {isPoster ? "Task Poster (Customer)" : "Tasker (Worker)"}
+                </span>
+              )}
             </div>
 
             {currentLinks.map((link) => (
