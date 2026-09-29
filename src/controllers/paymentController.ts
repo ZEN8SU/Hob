@@ -157,9 +157,10 @@ export const verifyRazorpayPayment = async (
 
     const totalAmount = amount ? Number(amount) : (booking.service_request.budget || 400);
 
-    const result = await prisma.$transaction(async (tx) => {
-      // 1. Create Payment in 'hold' status (Escrow Hold)
-      const payment = await tx.payment.create({
+    const result = await prisma.$transaction(
+      async (tx) => {
+        // 1. Create Payment in 'hold' status (Escrow Hold)
+        const payment = await tx.payment.create({
         data: {
           bookingId: cleanBookingId,
           amount: totalAmount,
@@ -194,7 +195,9 @@ export const verifyRazorpayPayment = async (
       });
 
       return { payment, transaction, updatedBooking };
-    });
+    },
+    { maxWait: 15000, timeout: 30000 }
+  );
 
     // Notify Tasker that funds are safely held in Escrow
     const notification = await prisma.notification.create({
@@ -272,36 +275,39 @@ export const releaseEscrowPayment = async (
     const platformCommission = Number(((totalAmount * PLATFORM_FEE_PERCENT) / 100).toFixed(2));
     const workerPayout = Number((totalAmount - platformCommission).toFixed(2));
 
-    const updated = await prisma.$transaction(async (tx) => {
-      // 1. Mark payment as released
-      const updatedPayment = await tx.payment.update({
-        where: { id: paymentId },
-        data: { status: "released" },
-      });
+    const updated = await prisma.$transaction(
+      async (tx) => {
+        // 1. Mark payment as released
+        const updatedPayment = await tx.payment.update({
+          where: { id: paymentId },
+          data: { status: "released" },
+        });
 
-      // 2. Record Worker Payout Credit Transaction
-      const workerPayoutTx = await tx.transaction.create({
-        data: {
-          paymentId: payment.id,
-          payerId: customerUserId,
-          payeeId: workerUserId,
-          amount: workerPayout,
-          settledAt: new Date(),
-        },
-      });
+        // 2. Record Worker Payout Credit Transaction
+        const workerPayoutTx = await tx.transaction.create({
+          data: {
+            paymentId: payment.id,
+            payerId: customerUserId,
+            payeeId: workerUserId,
+            amount: workerPayout,
+            settledAt: new Date(),
+          },
+        });
 
-      return {
-        payment: updatedPayment,
-        payoutBreakdown: {
-          totalAmount,
-          workerPayout,
-          workerPayoutPercentage: 100 - PLATFORM_FEE_PERCENT,
-          platformCommission,
-          platformCommissionPercentage: PLATFORM_FEE_PERCENT,
-        },
-        transaction: workerPayoutTx,
-      };
-    });
+        return {
+          payment: updatedPayment,
+          payoutBreakdown: {
+            totalAmount,
+            workerPayout,
+            workerPayoutPercentage: 100 - PLATFORM_FEE_PERCENT,
+            platformCommission,
+            platformCommissionPercentage: PLATFORM_FEE_PERCENT,
+          },
+          transaction: workerPayoutTx,
+        };
+      },
+      { maxWait: 15000, timeout: 30000 }
+    );
 
     // Notify Worker of credited wallet payout
     const notification = await prisma.notification.create({
@@ -366,26 +372,29 @@ export const refundEscrowPayment = async (
     const customerUserId = payment.booking.service_request.customer_profile.userId;
     const workerUserId = payment.booking.worker_profile.userId;
 
-    const refundResult = await prisma.$transaction(async (tx) => {
-      // 1. Mark payment as refunded
-      const updatedPayment = await tx.payment.update({
-        where: { id: paymentId },
-        data: { status: "refunded" },
-      });
+    const refundResult = await prisma.$transaction(
+      async (tx) => {
+        // 1. Mark payment as refunded
+        const updatedPayment = await tx.payment.update({
+          where: { id: paymentId },
+          data: { status: "refunded" },
+        });
 
-      // 2. Create double-entry Refund Transaction to Customer
-      const refundTx = await tx.transaction.create({
-        data: {
-          paymentId: payment.id,
-          payerId: workerUserId,
-          payeeId: customerUserId,
-          amount: payment.amount,
-          settledAt: new Date(),
-        },
-      });
+        // 2. Create double-entry Refund Transaction to Customer
+        const refundTx = await tx.transaction.create({
+          data: {
+            paymentId: payment.id,
+            payerId: workerUserId,
+            payeeId: customerUserId,
+            amount: payment.amount,
+            settledAt: new Date(),
+          },
+        });
 
-      return { updatedPayment, refundTx };
-    });
+        return { updatedPayment, refundTx };
+      },
+      { maxWait: 15000, timeout: 30000 }
+    );
 
     // Notify Customer of refunded escrow
     const notification = await prisma.notification.create({

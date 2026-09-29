@@ -207,42 +207,45 @@ export const acceptBid = async (
 
     const completionOtp = Math.floor(1000 + Math.random() * 9000).toString();
 
-    const result = await prisma.$transaction(async (tx) => {
-      const updatedBid = await tx.bid.update({
-        where: { id: bidId },
-        data: { status: "accepted" },
-      });
+    const result = await prisma.$transaction(
+      async (tx) => {
+        const updatedBid = await tx.bid.update({
+          where: { id: bidId },
+          data: { status: "accepted" },
+        });
 
-      await tx.bid.updateMany({
-        where: {
-          requestId: bid.requestId,
-          id: { not: bidId },
-        },
-        data: { status: "rejected" },
-      });
-
-      await tx.service_request.update({
-        where: { id: bid.requestId },
-        data: { status: "assigned", budget: bid.proposedPrice },
-      });
-
-      const booking = await tx.booking.create({
-        data: {
-          requestId: bid.requestId,
-          workerId: bid.workerId,
-          status: "pending",
-          otpCode: completionOtp,
-        },
-        include: {
-          service_request: true,
-          worker_profile: {
-            include: { user: { select: { id: true, name: true, phone: true } } },
+        await tx.bid.updateMany({
+          where: {
+            requestId: bid.requestId,
+            id: { not: bidId },
           },
-        },
-      });
+          data: { status: "rejected" },
+        });
 
-      return { updatedBid, booking };
-    });
+        await tx.service_request.update({
+          where: { id: bid.requestId },
+          data: { status: "assigned", budget: bid.proposedPrice },
+        });
+
+        const booking = await tx.booking.create({
+          data: {
+            requestId: bid.requestId,
+            workerId: bid.workerId,
+            status: "pending",
+            otpCode: completionOtp,
+          },
+          include: {
+            service_request: true,
+            worker_profile: {
+              include: { user: { select: { id: true, name: true, phone: true } } },
+            },
+          },
+        });
+
+        return { updatedBid, booking };
+      },
+      { maxWait: 15000, timeout: 30000 }
+    );
 
     const workerUserId = bid.worker_profile.userId;
     const notification = await prisma.notification.create({
