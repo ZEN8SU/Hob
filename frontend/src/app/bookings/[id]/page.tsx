@@ -173,35 +173,86 @@ export default function BookingDetailPage() {
     }
   };
 
-  // Poster Deposits Escrow via Razorpay
+  // Poster Deposits Escrow via Razorpay or Wallet
   const handlePayEscrow = async () => {
     try {
       setPayingEscrow(true);
+      const budget = booking?.service_request?.budget || 400;
+
       // 1. Create Razorpay Order
       const orderRes = await paymentApi.createRazorpayOrder({
         bookingId,
-        amount: booking?.service_request?.budget || 400,
+        amount: budget,
       });
 
       const order = orderRes.data.order;
+      const totalAmount = orderRes.data.breakdown?.totalAmount || budget;
 
-      // 2. Mock / Real Razorpay Verification
-      await paymentApi.verifyRazorpayPayment({
-        bookingId,
-        razorpayOrderId: order.id,
-        razorpayPaymentId: `pay_${Date.now()}`,
-        razorpaySignature: "mock_signature_approved",
-        amount: orderRes.data.breakdown?.totalAmount || booking?.service_request?.budget || 400,
-      });
+      // If mock keys or Razorpay script is not loaded in sandbox/dev
+      if (order.isMock || typeof window.Razorpay === "undefined") {
+        await paymentApi.verifyRazorpayPayment({
+          bookingId,
+          razorpayOrderId: order.id,
+          razorpayPaymentId: `pay_${Date.now()}`,
+          razorpaySignature: "mock_signature_approved",
+          amount: totalAmount,
+          method: "RAZORPAY_UPI",
+        });
 
-      alert("Escrow Payment Secured! Funds locked in Escrow. Chat is now unlocked.");
-      await fetchBooking();
+        alert("Escrow Payment Secured! Funds locked in Escrow. Chat is now unlocked.");
+        await fetchBooking();
+        return;
+      }
+
+      // Real Razorpay Checkout modal
+      const options = {
+        key: order.keyId,
+        amount: order.amount,
+        currency: order.currency,
+        name: "HOB Hyperlocal Platform",
+        description: `Escrow Payment for "${taskTitle}"`,
+        order_id: order.id,
+        prefill: {
+          name: user?.name || "Customer",
+          email: user?.email || "",
+          contact: user?.phone || "",
+        },
+        theme: {
+          color: "#facc15",
+        },
+        handler: async (response: any) => {
+          try {
+            await paymentApi.verifyRazorpayPayment({
+              bookingId,
+              razorpayOrderId: response.razorpay_order_id,
+              razorpayPaymentId: response.razorpay_payment_id,
+              razorpaySignature: response.razorpay_signature,
+              amount: totalAmount,
+              method: "RAZORPAY_CHECKOUT",
+            });
+
+            alert("Escrow Payment Secured! Funds locked in Escrow. Chat is now unlocked.");
+            await fetchBooking();
+          } catch (err: any) {
+            alert(err.response?.data?.message || "Payment verification failed.");
+          }
+        },
+        modal: {
+          ondismiss: () => {
+            setPayingEscrow(false);
+          },
+        },
+      };
+
+      const rzp = new window.Razorpay(options);
+      rzp.open();
     } catch (err: any) {
       alert(err.response?.data?.message || "Failed to process escrow payment.");
     } finally {
       setPayingEscrow(false);
     }
   };
+
 
   // Tasker Starts Task
   const handleStartTask = async () => {

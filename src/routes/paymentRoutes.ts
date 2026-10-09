@@ -2,6 +2,10 @@ import { Router } from "express";
 import {
   createRazorpayOrder,
   verifyRazorpayPayment,
+  createWalletTopUpOrder,
+  verifyWalletTopUp,
+  requestWalletWithdrawal,
+  payBookingWithWallet,
   releaseEscrowPayment,
   refundEscrowPayment,
   getPaymentByBooking,
@@ -14,9 +18,17 @@ const router = Router();
 
 router.use(authenticateJWT);
 
-// Razorpay Order Creation & Verification
+// Booking Escrow Payment (Razorpay)
 router.post("/create-order", createRazorpayOrder);
 router.post("/verify", verifyRazorpayPayment);
+
+// Wallet Direct Top-Up (Razorpay)
+router.post("/wallet/topup/create-order", createWalletTopUpOrder);
+router.post("/wallet/topup/verify", verifyWalletTopUp);
+
+// Wallet Withdrawal & Direct Booking Payment
+router.post("/wallet/withdraw", requestWalletWithdrawal);
+router.post("/wallet/pay-booking", payBookingWithWallet);
 
 // Escrow Release & Refund
 router.post("/release/:paymentId", releaseEscrowPayment);

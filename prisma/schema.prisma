@@ -139,18 +139,19 @@ model fee {
 
 model payment {
   id                String   @id @default(uuid()) @db.Uuid
-  bookingId         String   @db.Uuid
+  bookingId         String?  @db.Uuid
   amount            Float
   method            String
-  status            String   @default("pending") // "pending", "hold", "released", "refunded"
+  status            String   @default("pending") // "pending", "hold", "released", "refunded", "success"
   razorpayOrderId   String?
   razorpayPaymentId String?
   razorpaySignature String?
   createdAt         DateTime @default(now())
 
-  booking     booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  booking     booking?      @relation(fields: [bookingId], references: [id], onDelete: Cascade)
   transaction transaction[]
 }
+
 
 model transaction {
   id        String   @id @default(uuid()) @db.Uuid

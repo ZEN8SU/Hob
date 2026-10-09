@@ -26,7 +26,7 @@ export interface NormalizedLedgerTransaction {
 }
 
 /**
- * @desc   Create Razorpay Order for Accepted Booking
+ * @desc   Create Razorpay Order for Booking Escrow Deposit
  * @route  POST /api/payments/create-order
  * @access Private (Customer)
  */
@@ -77,6 +77,7 @@ export const createRazorpayOrder = async (
         bookingId: booking.id,
         customerId: customerUserId,
         workerId: booking.worker_profile.userId,
+        type: "ESCROW_BOOKING",
       },
     });
 
@@ -161,43 +162,43 @@ export const verifyRazorpayPayment = async (
       async (tx) => {
         // 1. Create Payment in 'hold' status (Escrow Hold)
         const payment = await tx.payment.create({
-        data: {
-          bookingId: cleanBookingId,
-          amount: totalAmount,
-          method: String(method).toUpperCase(),
-          status: "hold",
-          razorpayOrderId: String(razorpayOrderId),
-          razorpayPaymentId: String(razorpayPaymentId),
-          razorpaySignature: razorpaySignature ? String(razorpaySignature) : "mock_signature_approved",
-        },
-      });
+          data: {
+            bookingId: cleanBookingId,
+            amount: totalAmount,
+            method: String(method).toUpperCase(),
+            status: "hold",
+            razorpayOrderId: String(razorpayOrderId),
+            razorpayPaymentId: String(razorpayPaymentId),
+            razorpaySignature: razorpaySignature ? String(razorpaySignature) : "mock_signature_approved",
+          },
+        });
 
-      // 2. Create Double-entry Transaction record for Escrow Lock
-      const transaction = await tx.transaction.create({
-        data: {
-          paymentId: payment.id,
-          payerId: customerUserId,
-          payeeId: workerUserId,
-          amount: totalAmount,
-          settledAt: new Date(),
-        },
-      });
+        // 2. Create Double-entry Transaction record for Escrow Lock
+        const transaction = await tx.transaction.create({
+          data: {
+            paymentId: payment.id,
+            payerId: customerUserId,
+            payeeId: workerUserId,
+            amount: totalAmount,
+            settledAt: new Date(),
+          },
+        });
 
-      // 3. Confirm booking and start task lifecycle
-      const updatedBooking = await tx.booking.update({
-        where: { id: cleanBookingId },
-        data: { status: "confirmed" },
-      });
+        // 3. Confirm booking and start task lifecycle
+        const updatedBooking = await tx.booking.update({
+          where: { id: cleanBookingId },
+          data: { status: "confirmed" },
+        });
 
-      await tx.service_request.update({
-        where: { id: booking.requestId },
-        data: { status: "in_progress" },
-      });
+        await tx.service_request.update({
+          where: { id: booking.requestId },
+          data: { status: "in_progress" },
+        });
 
-      return { payment, transaction, updatedBooking };
-    },
-    { maxWait: 15000, timeout: 30000 }
-  );
+        return { payment, transaction, updatedBooking };
+      },
+      { maxWait: 15000, timeout: 30000 }
+    );
 
     // Notify Tasker that funds are safely held in Escrow
     const notification = await prisma.notification.create({
@@ -218,6 +219,361 @@ export const verifyRazorpayPayment = async (
     res.status(200).json({
       success: true,
       message: "Escrow funds locked successfully. Chat and task unlocked!",
+      payment: result.payment,
+      booking: result.updatedBooking,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc   Create Razorpay Order for Wallet Top-Up
+ * @route  POST /api/payments/wallet/topup/create-order
+ * @access Private
+ */
+export const createWalletTopUpOrder = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) throw new ApiError(401, "Unauthorized");
+
+    const { amount } = req.body;
+    const topUpAmount = Number(amount);
+
+    if (!topUpAmount || topUpAmount < 10) {
+      throw new ApiError(400, "Minimum wallet top-up amount is ₹10.");
+    }
+
+    const receipt = `topup_${userId.slice(0, 8)}_${Date.now().toString().slice(-4)}`;
+
+    const razorpayOrder = await createRzpOrder({
+      amountInINR: topUpAmount,
+      receipt,
+      notes: {
+        userId,
+        type: "WALLET_TOPUP",
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      order: razorpayOrder,
+      amount: topUpAmount,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc   Verify Wallet Top-Up Payment and Credit Ledger
+ * @route  POST /api/payments/wallet/topup/verify
+ * @access Private
+ */
+export const verifyWalletTopUp = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) throw new ApiError(401, "Unauthorized");
+
+    const {
+      razorpayOrderId,
+      razorpayPaymentId,
+      razorpaySignature,
+      amount,
+      method = "RAZORPAY_UPI",
+    } = req.body;
+
+    if (!razorpayOrderId || !razorpayPaymentId) {
+      throw new ApiError(400, "razorpayOrderId and razorpayPaymentId are required.");
+    }
+
+    const isSignatureValid = verifyRazorpaySignature(
+      String(razorpayOrderId),
+      String(razorpayPaymentId),
+      razorpaySignature ? String(razorpaySignature) : "mock_signature_approved"
+    );
+
+    if (!isSignatureValid) {
+      throw new ApiError(400, "Top-up verification failed: Invalid signature.");
+    }
+
+    const topUpAmount = Number(amount);
+
+    const result = await prisma.$transaction(async (tx) => {
+      // 1. Create topup payment record in 'success' status
+      const payment = await tx.payment.create({
+        data: {
+          amount: topUpAmount,
+          method: "WALLET_TOPUP",
+          status: "success",
+          razorpayOrderId: String(razorpayOrderId),
+          razorpayPaymentId: String(razorpayPaymentId),
+          razorpaySignature: razorpaySignature ? String(razorpaySignature) : "mock_signature_approved",
+        },
+      });
+
+      // 2. Create double-entry Credit Transaction
+      const transaction = await tx.transaction.create({
+        data: {
+          paymentId: payment.id,
+          payerId: userId,
+          payeeId: userId,
+          amount: topUpAmount,
+          settledAt: new Date(),
+        },
+      });
+
+      return { payment, transaction };
+    });
+
+    // Notify user
+    const notification = await prisma.notification.create({
+      data: {
+        userId,
+        title: `₹${topUpAmount} Added to Wallet! 💳`,
+        message: `Your wallet top-up via ${method} was successful. Current funds are available immediately.`,
+        type: "task_match",
+        data: { amount: topUpAmount },
+      },
+    });
+    emitNotificationToUser(userId, notification);
+
+    res.status(200).json({
+      success: true,
+      message: `₹${topUpAmount} added to wallet successfully!`,
+      payment: result.payment,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc   Withdraw Funds from Wallet to Bank/UPI
+ * @route  POST /api/payments/wallet/withdraw
+ * @access Private
+ */
+export const requestWalletWithdrawal = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) throw new ApiError(401, "Unauthorized");
+
+    const { amount, upiId, bankAccountNumber, ifscCode } = req.body;
+    const withdrawAmount = Number(amount);
+
+    if (!withdrawAmount || withdrawAmount < 50) {
+      throw new ApiError(400, "Minimum withdrawal amount is ₹50.");
+    }
+
+    if (!upiId && (!bankAccountNumber || !ifscCode)) {
+      throw new ApiError(400, "Please provide a valid UPI ID or Bank Account Details for payout.");
+    }
+
+    // Check available balance using double-entry ledger calculation
+    const allUserPayments = await prisma.payment.findMany({
+      where: {
+        OR: [
+          { booking: { service_request: { customer_profile: { userId } } } },
+          { booking: { worker_profile: { userId } } },
+          { transaction: { some: { OR: [{ payerId: userId }, { payeeId: userId }] } } },
+        ],
+      },
+      include: {
+        booking: {
+          include: {
+            service_request: { include: { customer_profile: true } },
+            worker_profile: true,
+          },
+        },
+        transaction: true,
+      },
+    });
+
+    const ledger = buildUserLedger(userId, allUserPayments);
+    if (ledger.wallet.availableBalance < withdrawAmount) {
+      throw new ApiError(
+        400,
+        `Insufficient available balance. You have ₹${ledger.wallet.availableBalance.toFixed(2)} available.`
+      );
+    }
+
+    const payoutMethod = upiId ? `UPI: ${upiId}` : `BANK: ${bankAccountNumber} (${ifscCode})`;
+
+    const result = await prisma.$transaction(async (tx) => {
+      const payment = await tx.payment.create({
+        data: {
+          amount: withdrawAmount,
+          method: "WALLET_WITHDRAWAL",
+          status: "success",
+          razorpayPaymentId: `payout_${Date.now()}`,
+        },
+      });
+
+      const transaction = await tx.transaction.create({
+        data: {
+          paymentId: payment.id,
+          payerId: userId,
+          payeeId: userId,
+          amount: withdrawAmount,
+          settledAt: new Date(),
+        },
+      });
+
+      return { payment, transaction };
+    });
+
+    // Notify user
+    const notification = await prisma.notification.create({
+      data: {
+        userId,
+        title: `₹${withdrawAmount} Withdrawal Processed 🏦`,
+        message: `Payout of ₹${withdrawAmount} sent to ${payoutMethod}. Transfer is instant.`,
+        type: "task_completed",
+        data: { amount: withdrawAmount, method: payoutMethod },
+      },
+    });
+    emitNotificationToUser(userId, notification);
+
+    res.status(200).json({
+      success: true,
+      message: `₹${withdrawAmount} withdrawal processed successfully to ${payoutMethod}.`,
+      payment: result.payment,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc   Pay for Booking directly using Available Wallet Balance
+ * @route  POST /api/payments/wallet/pay-booking
+ * @access Private (Customer)
+ */
+export const payBookingWithWallet = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) throw new ApiError(401, "Unauthorized");
+
+    const { bookingId } = req.body;
+    if (!bookingId) throw new ApiError(400, "Booking ID is required.");
+
+    const booking = await prisma.booking.findUnique({
+      where: { id: String(bookingId) },
+      include: {
+        service_request: { include: { customer_profile: true } },
+        worker_profile: true,
+      },
+    });
+
+    if (!booking) throw new ApiError(404, "Booking not found.");
+
+    const customerUserId = booking.service_request.customer_profile.userId;
+    const workerUserId = booking.worker_profile.userId;
+
+    if (userId !== customerUserId) {
+      throw new ApiError(403, "Only the customer who posted the task can pay.");
+    }
+
+    const baseLabor = booking.service_request.budget || 400;
+    const platformFee = Number(((baseLabor * PLATFORM_FEE_PERCENT) / 100).toFixed(2));
+    const totalAmount = Number((baseLabor + platformFee).toFixed(2));
+
+    // Check balance
+    const allUserPayments = await prisma.payment.findMany({
+      where: {
+        OR: [
+          { booking: { service_request: { customer_profile: { userId } } } },
+          { booking: { worker_profile: { userId } } },
+          { transaction: { some: { OR: [{ payerId: userId }, { payeeId: userId }] } } },
+        ],
+      },
+      include: {
+        booking: {
+          include: {
+            service_request: { include: { customer_profile: true } },
+            worker_profile: true,
+          },
+        },
+        transaction: true,
+      },
+    });
+
+    const ledger = buildUserLedger(userId, allUserPayments);
+    if (ledger.wallet.availableBalance < totalAmount) {
+      throw new ApiError(
+        400,
+        `Insufficient wallet balance. Total required is ₹${totalAmount}, but available is ₹${ledger.wallet.availableBalance.toFixed(2)}. Please add funds or pay via UPI.`
+      );
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      // 1. Create Payment in 'hold' status
+      const payment = await tx.payment.create({
+        data: {
+          bookingId: booking.id,
+          amount: totalAmount,
+          method: "WALLET_BALANCE",
+          status: "hold",
+          razorpayPaymentId: `wallet_escrow_${Date.now()}`,
+        },
+      });
+
+      // 2. Create Double-entry transaction
+      const transaction = await tx.transaction.create({
+        data: {
+          paymentId: payment.id,
+          payerId: customerUserId,
+          payeeId: workerUserId,
+          amount: totalAmount,
+          settledAt: new Date(),
+        },
+      });
+
+      // 3. Confirm booking
+      const updatedBooking = await tx.booking.update({
+        where: { id: booking.id },
+        data: { status: "confirmed" },
+      });
+
+      await tx.service_request.update({
+        where: { id: booking.requestId },
+        data: { status: "in_progress" },
+      });
+
+      return { payment, transaction, updatedBooking };
+    });
+
+    // Notify Tasker
+    const notification = await prisma.notification.create({
+      data: {
+        userId: workerUserId,
+        title: "Escrow Payment Secured! 🔒",
+        message: `Poster paid ₹${totalAmount} from Wallet Escrow for "${booking.service_request.title || "Task"}". Chat is unlocked!`,
+        type: "escrow_locked",
+        data: { bookingId: booking.id, amount: totalAmount },
+      },
+    });
+    emitNotificationToUser(workerUserId, notification);
+
+    res.status(200).json({
+      success: true,
+      message: "Paid via Escrow Wallet successfully. Task is now in progress!",
       payment: result.payment,
       booking: result.updatedBooking,
     });
@@ -256,7 +612,7 @@ export const releaseEscrowPayment = async (
       },
     });
 
-    if (!payment) {
+    if (!payment || !payment.booking) {
       throw new ApiError(404, "Payment record not found.");
     }
 
@@ -361,7 +717,7 @@ export const refundEscrowPayment = async (
       },
     });
 
-    if (!payment) {
+    if (!payment || !payment.booking) {
       throw new ApiError(404, "Payment record not found.");
     }
 
@@ -433,21 +789,66 @@ const buildUserLedger = (userId: string, payments: any[]) => {
     const workerUserId = p.booking?.worker_profile?.userId;
     const isCustomer = customerUserId === userId;
     const isWorker = workerUserId === userId;
-    const taskTitle = p.booking?.service_request?.title || "Hyperlocal Micro-Task";
+    const taskTitle = p.booking?.service_request?.title || (p.method === "WALLET_TOPUP" ? "Wallet Top-Up" : p.method === "WALLET_WITHDRAWAL" ? "Bank Withdrawal" : "Escrow Payment");
     const paymentStatus = (p.status || "").toLowerCase();
 
     const payerObj = {
-      id: customerUserId,
-      name: p.booking?.service_request?.customer_profile?.user?.name || "Customer",
+      id: customerUserId || userId,
+      name: p.booking?.service_request?.customer_profile?.user?.name || "User",
       phone: p.booking?.service_request?.customer_profile?.user?.phone,
     };
 
     const payeeObj = {
-      id: workerUserId,
-      name: p.booking?.worker_profile?.user?.name || "Tasker",
+      id: workerUserId || userId,
+      name: p.booking?.worker_profile?.user?.name || "Platform",
       phone: p.booking?.worker_profile?.user?.phone,
     };
 
+    // 1. Direct Wallet Top-Up
+    if (p.method === "WALLET_TOPUP" || p.method === "TOPUP") {
+      totalCredits += p.amount;
+      transactions.push({
+        id: `topup-${p.id}`,
+        paymentId: p.id,
+        type: "CREDIT",
+        amount: p.amount,
+        rawAmount: p.amount,
+        status: "SUCCESS",
+        description: "Instant Wallet Top-up (Razorpay)",
+        method: "Razorpay UPI/Card",
+        settledAt: p.createdAt,
+        taskTitle: "Wallet Deposit",
+        role: "poster",
+        payer: payerObj,
+        payee: payeeObj,
+        payment: p,
+      });
+      continue;
+    }
+
+    // 2. Direct Wallet Withdrawal
+    if (p.method === "WALLET_WITHDRAWAL" || p.method === "WITHDRAWAL") {
+      totalDebits += p.amount;
+      transactions.push({
+        id: `withdraw-${p.id}`,
+        paymentId: p.id,
+        type: "DEBIT",
+        amount: p.amount,
+        rawAmount: -p.amount,
+        status: "SUCCESS",
+        description: "Bank/UPI Payout Transfer",
+        method: "IMPS/UPI Payout",
+        settledAt: p.createdAt,
+        taskTitle: "Withdrawal",
+        role: "tasker",
+        payer: payerObj,
+        payee: payeeObj,
+        payment: p,
+      });
+      continue;
+    }
+
+    // 3. Booking Escrow Flows
     if (isCustomer) {
       if (paymentStatus === "hold") {
         // Escrow Hold: Money locked from Poster available balance into Escrow
@@ -593,6 +994,7 @@ export const getWalletLedger = async (
         OR: [
           { booking: { service_request: { customer_profile: { userId } } } },
           { booking: { worker_profile: { userId } } },
+          { transaction: { some: { OR: [{ payerId: userId }, { payeeId: userId }] } } },
         ],
       },
       include: {
@@ -651,6 +1053,7 @@ export const getMyTransactions = async (
         OR: [
           { booking: { service_request: { customer_profile: { userId } } } },
           { booking: { worker_profile: { userId } } },
+          { transaction: { some: { OR: [{ payerId: userId }, { payeeId: userId }] } } },
         ],
       },
       include: {

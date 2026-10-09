@@ -172,12 +172,30 @@ export const paymentApi = {
     amount?: number;
     method?: string;
   }) => api.post("/payments/verify", payload),
+  createWalletTopUpOrder: (payload: { amount: number }) =>
+    api.post("/payments/wallet/topup/create-order", payload),
+  verifyWalletTopUp: (payload: {
+    razorpayOrderId: string;
+    razorpayPaymentId: string;
+    razorpaySignature?: string;
+    amount: number;
+    method?: string;
+  }) => api.post("/payments/wallet/topup/verify", payload),
+  requestWalletWithdrawal: (payload: {
+    amount: number;
+    upiId?: string;
+    bankAccountNumber?: string;
+    ifscCode?: string;
+  }) => api.post("/payments/wallet/withdraw", payload),
+  payBookingWithWallet: (payload: { bookingId: string }) =>
+    api.post("/payments/wallet/pay-booking", payload),
   releaseEscrow: (paymentId: string) => api.post(`/payments/release/${paymentId}`),
   refundEscrow: (paymentId: string) => api.post(`/payments/refund/${paymentId}`),
   getWalletLedger: () => api.get("/payments/wallet"),
   getMyTransactions: () => api.get("/payments/transactions"),
   getPaymentByBooking: (bookingId: string) => api.get(`/payments/booking/${bookingId}`),
 };
+
 
 // Reviews Endpoints
 export const reviewApi = {
