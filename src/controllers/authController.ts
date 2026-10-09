@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import prisma from "../config/db.js";
-import { supabase } from "../config/supabase.js";
+import { supabase, supabaseAdmin } from "../config/supabase.js";
 import { ApiError } from "../middlewares/errorHandler.js";
 import { AuthenticatedRequest } from "../middlewares/auth.js";
 import { sendOtpEmail } from "../services/emailService.js";
@@ -15,6 +15,7 @@ const DEFAULT_DEV_OTP = "123456";
 const generateOtpCode = (): string => {
   return Math.floor(100000 + Math.random() * 900000).toString();
 };
+
 
 /**
  * Generate standard JWT Auth Token
@@ -220,22 +221,39 @@ export const sendOtp = async (req: Request, res: Response, next: NextFunction): 
     }
 
     if (targetEmail) {
-      console.log(`[Supabase Auth] Sending Email OTP to: ${targetEmail}`);
-      const { data, error } = await supabase.auth.signInWithOtp({
-        email: targetEmail,
-        options: {
-          shouldCreateUser: true,
+      console.log(`[Auth Service] Generating Official Supabase OTP for: ${targetEmail}`);
+      let otpCode = generateOtpCode();
+
+      try {
+        const linkRes = await supabaseAdmin.auth.admin.generateLink({
+          type: "magiclink",
+          email: targetEmail,
+        });
+
+        if (linkRes.data?.properties?.email_otp) {
+          otpCode = linkRes.data.properties.email_otp;
+          console.log(`[Supabase Auth] Official 6-digit OTP generated: ${otpCode}`);
+        }
+      } catch (supErr: any) {
+        console.warn("[Supabase Auth] generateLink fallback:", supErr?.message);
+      }
+
+      // Save to database OTP table for high-availability backup
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+      await prisma.otp.create({
+        data: {
+          email: targetEmail,
+          otp: otpCode,
+          expiresAt,
         },
       });
 
-      if (error) {
-        console.error("[Supabase Auth] signInWithOtp error:", error);
-        throw new ApiError(error.status || 400, error.message || "Failed to send Supabase OTP email.");
-      }
+      // Dispatch real email via Brevo SMTP to user's inbox
+      await sendOtpEmail(targetEmail, otpCode);
 
       res.status(200).json({
         success: true,
-        message: `OTP verification code sent to ${targetEmail}. Please check your email.`,
+        message: `6-digit OTP verification code sent to ${targetEmail}. Please check your inbox.`,
         email: targetEmail,
       });
       return;
@@ -265,6 +283,9 @@ export const sendOtp = async (req: Request, res: Response, next: NextFunction): 
   }
 };
 
+
+
+
 /**
  * @desc   Verify Supabase OTP, Register/Login User, Demand Mandatory Onboarding (Name, Age, Skills), and Issue JWT
  * @route  POST /api/auth/verify-otp
@@ -280,34 +301,43 @@ export const verifyOtp = async (req: Request, res: Response, next: NextFunction)
       throw new ApiError(400, "Email and OTP code are required.");
     }
 
-    const cleanOtp = String(otp).trim();
+    const cleanOtp = String(otp).trim().replace(/\s+/g, "");
     let isVerified = false;
 
-    // 1. Verify with Supabase Auth
+    // 1. Verify with Supabase Auth (tries magiclink, email, signup types)
     if (targetEmail && !targetEmail.endsWith("@hyperlocal.in")) {
-      console.log(`[Supabase Auth] Verifying OTP for: ${targetEmail}`);
-      
-      // Try type 'email'
-      const { data: emailData, error: emailError } = await supabase.auth.verifyOtp({
+      console.log(`[Supabase Auth] Verifying OTP ${cleanOtp} for: ${targetEmail}`);
+
+      // Try type 'magiclink'
+      const { data: magicData, error: magicError } = await supabase.auth.verifyOtp({
         email: targetEmail,
         token: cleanOtp,
-        type: "email",
+        type: "magiclink",
       });
 
-      if (!emailError && emailData?.user) {
+      if (!magicError && magicData?.user) {
         isVerified = true;
       } else {
-        // Fallback: try type 'signup' or 'magiclink'
-        const { data: signupData, error: signupError } = await supabase.auth.verifyOtp({
+        // Try type 'email'
+        const { data: emailData, error: emailError } = await supabase.auth.verifyOtp({
           email: targetEmail,
           token: cleanOtp,
-          type: "signup",
+          type: "email",
         });
 
-        if (!signupError && signupData?.user) {
+        if (!emailError && emailData?.user) {
           isVerified = true;
         } else {
-          console.warn("[Supabase Auth] Verification failed:", emailError?.message || signupError?.message);
+          // Try type 'signup'
+          const { data: signupData, error: signupError } = await supabase.auth.verifyOtp({
+            email: targetEmail,
+            token: cleanOtp,
+            type: "signup",
+          });
+
+          if (!signupError && signupData?.user) {
+            isVerified = true;
+          }
         }
       }
     }
@@ -317,7 +347,7 @@ export const verifyOtp = async (req: Request, res: Response, next: NextFunction)
       isVerified = true;
     }
 
-    // 3. Database OTP fallback
+    // 3. Database OTP fallback (Direct matching against verified stored OTP)
     if (!isVerified) {
       const dbOtp = await prisma.otp.findFirst({
         where: {
@@ -341,6 +371,7 @@ export const verifyOtp = async (req: Request, res: Response, next: NextFunction)
     if (!isVerified) {
       throw new ApiError(400, "Invalid or expired OTP. Please check the code sent to your email or request a new one.");
     }
+
 
     // Check if user already exists in PostgreSQL database
 

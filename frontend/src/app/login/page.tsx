@@ -272,27 +272,24 @@ export default function LoginPage() {
                   <div className="p-4 rounded-2xl bg-yellow-50 border border-yellow-200">
                     <div className="flex items-center justify-between mb-2">
                       <label className="text-xs font-extrabold text-zinc-900 uppercase">
-                        6-Digit OTP Code
+                        Verification OTP Code
                       </label>
-                      <button
-                        type="button"
-                        onClick={() => setOtpCode("123456")}
-                        className="text-[11px] font-black text-yellow-900 bg-yellow-200 hover:bg-yellow-300 px-2 py-0.5 rounded-md"
-                      >
-                        Auto-Fill (123456)
-                      </button>
+                      <span className="text-[11px] font-bold text-yellow-900 bg-yellow-200 px-2 py-0.5 rounded-md">
+                        Check Email Inbox
+                      </span>
                     </div>
 
                     <Input
                       type="text"
-                      maxLength={6}
+                      maxLength={10}
                       value={otpCode}
-                      onChange={(e) => setOtpCode(e.target.value)}
-                      placeholder="123456"
+                      onChange={(e) => setOtpCode(e.target.value.trim())}
+                      placeholder="Enter OTP from email"
                       className="text-center font-black tracking-widest text-lg bg-white"
                       required
                     />
                   </div>
+
 
                   <div className="pt-2 space-y-2">
                     <Button
